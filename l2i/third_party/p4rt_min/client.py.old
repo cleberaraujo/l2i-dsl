@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+"""
+P4Runtime minimal client.
+
+Decisão de engenharia (reprodutibilidade):
+- Para evitar depender de grpcio-tools/protoc (tooling pesado e com problemas de wheel em Python 3.12),
+  este cliente utiliza os stubs "p4.*" fornecidos pelo pacote pip "p4runtime".
+- Isso mantém o setup simples: pip install p4runtime + protobuf==3.20.3.
+
+Importante:
+- Se protobuf estiver em versões novas (>=4/5/6), stubs antigos podem quebrar com
+  "Descriptors cannot be created directly".
+- Neste projeto, recomenda-se manter protobuf==3.20.3 para compatibilidade.
+"""
+
+from dataclasses import dataclass
+from typing import Optional, Iterable
+
+import grpc
+
+try:
+    from p4.v1 import p4runtime_pb2, p4runtime_pb2_grpc
+    from p4.config.v1 import p4info_pb2
+except Exception as e:
+    raise ImportError(
+        "Failed to import P4Runtime protobuf stubs from the 'p4runtime' package.\n"
+        "Expected modules: p4.v1.p4runtime_pb2, p4.v1.p4runtime_pb2_grpc, p4.config.v1.p4info_pb2\n"
+        f"Original error: {e}\n"
+        "\nFix (recommended):\n"
+        "  sudo /home/dev/net-dev/venv/bin/python -m pip install -U p4runtime\n"
+        "  sudo /home/dev/net-dev/venv/bin/python -m pip install --force-reinstall 'protobuf==3.20.3'\n"
+    )
+
+
+@dataclass
+class P4RuntimeTarget:
+    addr: str
+    device_id: int = 0
+    election_id_high: int = 0
+    election_id_low: int = 1
+
+
+def read_p4info_txtpb(path: str) -> p4info_pb2.P4Info:
+    import google.protobuf.text_format as text_format
+
+    p4info = p4info_pb2.P4Info()
+    with open(path, "r", encoding="utf-8") as f:
+        text_format.Merge(f.read(), p4info)
+    return p4info
+
+
+class P4InfoIndex:
+    def __init__(self, p4info: p4info_pb2.P4Info):
+        self.p4info = p4info
+        self.tables_by_name = {t.preamble.name: t for t in p4info.tables}
+        self.actions_by_name = {a.preamble.name: a for a in p4info.actions}
+
+    def table_id(self, name: str) -> int:
+        return self.tables_by_name[name].preamble.id
+
+    def action_id(self, name: str) -> int:
+        return self.actions_by_name[name].preamble.id
+
+    def table_match_field_id(self, table_name: str, field_name: str) -> int:
+        t = self.tables_by_name[table_name]
+        for mf in t.match_fields:
+            if mf.name == field_name:
+                return mf.id
+        raise KeyError(f"Match field {field_name} not found in table {table_name}")
+
+    def action_param_id(self, action_name: str, param_name: str) -> int:
+        a = self.actions_by_name[action_name]
+        for p in a.params:
+            if p.name == param_name:
+                return p.id
+        raise KeyError(f"Action param {param_name} not found in action {action_name}")
+
+
+def ipv4_to_bytes(ip: str) -> bytes:
+    import ipaddress
+    return ipaddress.IPv4Address(ip).packed
+
+
+class P4RuntimeClient:
+    def __init__(self, target: P4RuntimeTarget):
+        self.target = target
+        self.channel = grpc.insecure_channel(target.addr)
+        self.stub = p4runtime_pb2_grpc.P4RuntimeStub(self.channel)
+
+    def master_arbitration(self) -> None:
+        req = p4runtime_pb2.StreamMessageRequest(
+            arbitration=p4runtime_pb2.MasterArbitrationUpdate(
+                device_id=self.target.device_id,
+                election_id=p4runtime_pb2.Uint128(
+                    high=self.target.election_id_high,
+                    low=self.target.election_id_low,
+                ),
+            )
+        )
+        stream = self.stub.StreamChannel(iter([req]))
+        _ = next(stream)
+
+    def write_update(self, updates: Iterable[p4runtime_pb2.Update]) -> None:
+        req = p4runtime_pb2.WriteRequest(
+            device_id=self.target.device_id,
+            election_id=p4runtime_pb2.Uint128(
+                high=self.target.election_id_high,
+                low=self.target.election_id_low,
+            ),
+            updates=list(updates),
+        )
+        self.stub.Write(req)
+
+    def read_table_entries(self, table_id: Optional[int] = None):
+        entity = p4runtime_pb2.Entity()
+        if table_id is not None:
+            entity.table_entry.table_id = table_id
+        req = p4runtime_pb2.ReadRequest(device_id=self.target.device_id, entities=[entity])
+        return self.stub.Read(req)
+
+    def close(self) -> None:
+        try:
+            self.channel.close()
+        except Exception:
+            pass
+
+
+def build_lpm_match(field_id: int, ip: str, prefix_len: int) -> p4runtime_pb2.FieldMatch:
+    return p4runtime_pb2.FieldMatch(
+        field_id=field_id,
+        lpm=p4runtime_pb2.FieldMatch.LPM(
+            value=ipv4_to_bytes(ip),
+            prefix_len=prefix_len,
+        ),
+    )
+
+
+def build_action(action_id: int, param_id: int, param_value_int: int) -> p4runtime_pb2.Action:
+    b = int(param_value_int).to_bytes(2, byteorder="big", signed=False)
+    return p4runtime_pb2.Action(
+        action_id=action_id,
+        params=[p4runtime_pb2.Action.Param(param_id=param_id, value=b)],
+    )
+
+
+def build_table_entry_lpm(table_id: int, match: p4runtime_pb2.FieldMatch,
+                          action: p4runtime_pb2.Action) -> p4runtime_pb2.TableEntry:
+    return p4runtime_pb2.TableEntry(
+        table_id=table_id,
+        match=[match],
+        action=p4runtime_pb2.TableAction(action=action),
+    )
+
+
+def update_table_entry(entry: p4runtime_pb2.TableEntry) -> p4runtime_pb2.Update:
+    return p4runtime_pb2.Update(
+        type=p4runtime_pb2.Update.MODIFY,
+        entity=p4runtime_pb2.Entity(table_entry=entry),
+    )
+
+
+def dump_read_responses(responses) -> str:
+    out = []
+    for r in responses:
+        out.append(str(r))
+    return "\n".join(out)

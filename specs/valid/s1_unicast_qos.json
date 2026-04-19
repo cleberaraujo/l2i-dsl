@@ -1,0 +1,15 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "sbrc2026",
+  "scope": "multidomain-A-B-C",
+  "flow_id": "S1_UnicastQoS",
+  "requirements": {
+    "latency": { "max_ms": 30, "percentile": "P99" },
+    "bandwidth": { "min_mbps": 4 },
+    "priority": { "level": "high" },
+    "multicast": { "enabled": false }
+  },
+  "metadata": {
+    "labels": ["paper:S1", "profile:domA/domB/domC"]
+  }
+}

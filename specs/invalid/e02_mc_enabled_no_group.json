@@ -1,0 +1,9 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "insert.ufba",
+  "scope": "seg-B",
+  "flow": { "id": "StreamBad" },
+  "requirements": {
+    "multicast": { "enabled": true }
+  }
+}

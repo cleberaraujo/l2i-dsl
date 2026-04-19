@@ -1,0 +1,18 @@
+# dsl/l2i/backends_real.yaml
+B:
+  backend: real_netconf
+  target:
+    host: 127.0.0.1
+    port: 830
+    user: "netconf"
+    key_filename: /home/l2i/.ssh/l2i_netconf_key
+    timeout:   10
+
+C:
+  backend: real_p4
+  target:
+    address: 127.0.0.1:9559
+    device_id: 0
+    election_id: [0, 100]   # era [0, 1]
+    manage_switch: false
+    dst_ip: 10.0.0.4

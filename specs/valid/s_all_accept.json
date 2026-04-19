@@ -1,0 +1,12 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "org.test",
+  "scope": "demo",
+  "flow": { "id": "TestFlow_AllDomains" },
+  "requirements": {
+    "latency": { "max_ms": 30, "percentile": "P99" },
+    "bandwidth": { "min_mbps": 5, "max_mbps": 8, "burst_mbps": 2 },
+    "priority": { "level": "high" }
+  },
+  "target_profile": "universal"
+}

@@ -1,0 +1,625 @@
+# -*- coding: utf-8 -*-
+"""
+S1: Unicast QoS multi-domínios (A/B/C) com 3 hosts (h1,h2,h3).
+
+Motivação (reprodutibilidade científica):
+- Precisamos separar explicitamente:
+  * INTENÇÃO (spec L2I) -> requisitos de QoS do fluxo de interesse (h1 -> h2).
+  * AMBIENTE (args) -> capacidade do testbed e carga concorrente BE.
+- Precisamos de 3 hosts para diferenciar:
+  * FLOW: tráfego sob intent (h1 -> h2)
+  * BE: tráfego concorrente (h1 -> h3)
+
+Artefatos (results/S1):
+- dom_A.json / tc_dump_A.txt (comandos + read-back)
+- dom_B.json / netconf_dump_B.txt (read-back do running config, quando disponível)
+- dom_C.json / p4_dump_C.txt (read-back de tabela, quando disponível)
+- iperf_flow.json / iperf_be.json
+- rtt_flow.csv (seq,rtt_ms) + preflight_flow.txt
+- summary S1_{TS}.json (inclui intent, env, metrics e conformance)
+
+Domínios:
+- A: Linux tc/htb local (namespace h1)
+- B: NETCONF (ncclient) mock/real
+- C: P4Runtime (gRPC) mock/real
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime
+import inspect
+import json
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from l2i.backends.router import get_backends
+
+ROOT = Path(__file__).resolve().parents[1]
+RES_DIR = ROOT / "results" / "S1"
+RES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------- util ----------------
+
+def utc_ts() -> str:
+    # timezone-aware (evita DeprecationWarning em versões novas)
+    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def run(cmd: List[str],
+        check: bool = True,
+        capture: bool = False,
+        ns: str | None = None) -> str | None:
+    if ns:
+        cmd = ["ip", "netns", "exec", ns, *cmd]
+    p = subprocess.run(cmd, text=True, capture_output=True)
+    if check and p.returncode != 0:
+        raise RuntimeError(
+            f"cmd failed: {' '.join(cmd)}\nRC={p.returncode}\nSTDOUT:\n{p.stdout}\nSTDERR:\n{p.stderr}"
+        )
+    return p.stdout if capture else None
+
+
+def safe_dump_json(path: Path, obj: Any) -> None:
+    try:
+        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
+    except Exception as e:
+        path.write_text(json.dumps({"error": f"dump_failed: {e}"}, ensure_ascii=False, indent=2))
+
+
+def load_json_or_fail(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"--spec file not found: {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ValueError(f"Invalid JSON in spec: {path} ({e})") from e
+
+
+def _mask_secret(d: Dict[str, Any], keys: Tuple[str, ...] = ("password", "pass", "secret")) -> Dict[str, Any]:
+    out = dict(d)
+    for k in keys:
+        if k in out and out[k] is not None:
+            out[k] = "***"
+    return out
+
+
+# ---------------- métricas ----------------
+
+def collect_rtt_csv(ns: str, dst_ip: str, samples: int, out_csv: Path, interval_ms: int = 50) -> Tuple[int, int]:
+    """
+    RTT via ping (seq,rtt_ms). Retorna (n_ok, n_req).
+    """
+    itv = max(1, int(interval_ms)) / 1000.0
+    awk = r"""awk '/time=/{idx++; sub(/time=/, "", $7); printf("%d,%.3f\n", idx, $7)}'"""
+    cmd = f"ping -n -i {itv:.3f} -c {samples} {dst_ip} | {awk}"
+    out = run(["bash", "-lc", cmd], check=True, capture=True, ns=ns) or ""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    out_csv.write_text("\n".join(["seq,rtt_ms", *lines]))
+    return (len(lines), samples)
+
+
+def rtt_percentile(csv_path: Path, pctl: str) -> Tuple[float, int]:
+    """
+    pctl em {"P50","P95","P99"}.
+    Retorna (valor_ms, n).
+    """
+    vals: List[float] = []
+    with csv_path.open() as f:
+        rd = csv.DictReader(f)
+        for r in rd:
+            try:
+                vals.append(float(r["rtt_ms"]))
+            except Exception:
+                pass
+    if not vals:
+        return 0.0, 0
+    vals.sort()
+    pmap = {"P50": 0.50, "P95": 0.95, "P99": 0.99}
+    p = pmap.get(pctl.upper(), 0.99)
+    k = (len(vals) - 1) * p
+    i = int(k)
+    d = k - i
+    if i + 1 < len(vals):
+        v = vals[i] * (1 - d) + vals[i + 1] * d
+    else:
+        v = vals[i]
+    return round(v, 3), len(vals)
+
+
+def _wait_iperf_listen(ns: str, port: int, tries: int = 40, sleep_s: float = 0.05) -> bool:
+    for _ in range(tries):
+        time.sleep(sleep_s)
+        out = run(["ss", "-lntp"], ns=ns, check=False, capture=True) or ""
+        if f":{port}" in out and "iperf3" in out:
+            return True
+    return False
+
+
+def start_iperf_server(ns: str, bind_ip: str, port: int) -> subprocess.Popen:
+    """
+    iperf3 server -1 (uma conexão). Retorna Popen.
+    """
+    cmd = ["ip", "netns", "exec", ns, "iperf3", "-s", "-1", "-B", bind_ip, "-p", str(port)]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def run_iperf_client_json(ns: str, dst_ip: str, duration: int, mbps: float, port: int) -> Dict[str, Any]:
+    cmd = ["ip", "netns", "exec", ns, "iperf3",
+           "-c", dst_ip, "-p", str(port),
+           "-t", str(duration), "-b", f"{mbps}M", "--json"]
+    p = subprocess.run(cmd, text=True, capture_output=True)
+    if p.returncode == 0 and p.stdout.strip().startswith("{"):
+        try:
+            return json.loads(p.stdout)
+        except Exception:
+            return {"error": "iperf_parse_failed", "stdout": p.stdout, "stderr": p.stderr}
+    return {"error": "iperf_client_failed", "stdout": p.stdout, "stderr": p.stderr}
+
+
+def parse_iperf_mbps(j: Dict[str, Any]) -> float | None:
+    if not isinstance(j, dict) or j.get("error"):
+        return None
+    try:
+        bps = j["end"]["sum_received"]["bits_per_second"]
+        return round(float(bps) / 1e6, 3) if bps else None
+    except Exception:
+        return None
+
+
+# ---------------- TC (Domínio A) ----------------
+
+def tc_apply_h1_for_s1(*,
+                       ns: str,
+                       dev: str,
+                       link_mbps: float,
+                       flow_dst_ip: str,
+                       flow_min_mbps: float,
+                       flow_max_mbps: float) -> Dict[str, Any]:
+    """
+    Configura htb em h1-eth0:
+      - class 1:10 para FLOW (dst=flow_dst_ip): rate=flow_min, ceil=flow_max
+      - class 1:20 default para BE: rate=1, ceil=link_mbps
+    """
+    cmds: List[List[str]] = []
+
+    def _r(c: List[str], check: bool = True):
+        cmds.append(c)
+        run(c, check=check, ns=ns)
+
+    # Limpa estado anterior (não falha se não existir)
+    _r(["tc", "qdisc", "del", "dev", dev, "root"], check=False)
+
+    # Root HTB com default 20 (BE)
+    _r(["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb", "default", "20"])
+
+    # Parent (capacidade do enlace do AMBIENTE)
+    _r(["tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1",
+        "htb", "rate", f"{int(link_mbps)}mbit", "ceil", f"{int(link_mbps)}mbit"])
+
+    # FLOW (classe 10)
+    _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", "1:10",
+        "htb", "rate", f"{float(flow_min_mbps):.3f}mbit", "ceil", f"{float(flow_max_mbps):.3f}mbit"])
+
+    # BE default (classe 20)
+    _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", "1:20",
+        "htb", "rate", "1mbit", "ceil", f"{int(link_mbps)}mbit"])
+
+    # Filtro para FLOW: match ip dst
+    _r(["tc", "filter", "add", "dev", dev, "protocol", "ip", "parent", "1:", "prio", "1", "u32",
+        "match", "ip", "dst", flow_dst_ip, "flowid", "1:10"])
+
+    qdisc = run(["tc", "qdisc", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
+    classes = run(["tc", "class", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
+    filters = run(["tc", "filter", "show", "dev", dev, "parent", "1:"], check=False, capture=True, ns=ns) or ""
+
+    return {
+        "commands": [" ".join(c) for c in cmds],
+        "readback": {"qdisc": qdisc.strip(), "class": classes.strip(), "filter": filters.strip()},
+    }
+
+
+# ---------------- backends B/C ----------------
+
+def _call_apply_qos(mod: Any,
+                    domain_ctx: Dict[str, Any],
+                    intent: Dict[str, Any],
+                    target: Optional[Dict[str, Any]]) -> Any:
+    fn = getattr(mod, "apply_qos")
+    sig = inspect.signature(fn)
+    nparams = len(sig.parameters)
+    if nparams >= 3:
+        try:
+            return fn(domain_ctx, intent, target)
+        except TypeError:
+            return fn(domain_ctx.get("name", "X"), intent, target)
+    return fn(domain_ctx, intent)
+
+
+def _normalize_backend_result(raw: Any) -> Tuple[bool, Any]:
+    if isinstance(raw, (list, tuple)) and len(raw) == 2 and isinstance(raw[0], bool):
+        return raw[0], raw[1]
+    if isinstance(raw, dict) and isinstance(raw.get("applied"), bool):
+        return raw["applied"], raw
+    if isinstance(raw, dict) and isinstance(raw.get("ok"), bool):
+        return raw["ok"], raw
+    return True, raw
+
+
+def _apply_backend_chain(mod_or_list: Union[Any, List[Any]],
+                         domain_ctx: Dict[str, Any],
+                         intent: Dict[str, Any],
+                         target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    mods = mod_or_list if isinstance(mod_or_list, (list, tuple)) else [mod_or_list]
+    responses = []
+    all_applied = True
+    for m in mods:
+        bname = getattr(m, "__name__", str(m))
+        try:
+            raw = _call_apply_qos(m, domain_ctx=domain_ctx, intent=intent, target=target)
+            applied, info = _normalize_backend_result(raw)
+            if not applied:
+                all_applied = False
+            responses.append({"backend": bname, "applied": applied, "response": info})
+        except Exception as e:
+            all_applied = False
+            responses.append({"backend": bname, "applied": False, "error": str(e)})
+    return {"applied": all_applied, "responses": responses}
+
+
+def _load_real_targets_yaml() -> Dict[str, Any]:
+    import yaml
+    ypath = ROOT / "l2i" / "backends" / "backends_real.yaml"
+    if not ypath.exists():
+        raise FileNotFoundError(f"Missing real-backends config: {ypath}")
+    return yaml.safe_load(ypath.read_text(encoding="utf-8")) or {}
+
+
+# ---------------- main ----------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", required=True)
+    ap.add_argument("--duration", type=int, default=30)
+    ap.add_argument("--mode", choices=["baseline", "adapt"], default="baseline")
+    ap.add_argument("--backend", choices=["mock", "real"], default="mock")
+
+    # Ambiente (admin/operator)
+    ap.add_argument("--bwA", type=float, default=100.0, help="(env) link capacity domain A (mbps)")
+    ap.add_argument("--bwB", type=float, default=100.0, help="(env) link capacity domain B (mbps)")
+    ap.add_argument("--bwC", type=float, default=100.0, help="(env) link capacity domain C (mbps)")
+    ap.add_argument("--delay-ms", type=float, default=1.0, help="(env) delay placeholder (ms)")
+
+    # Carga concorrente e carga do fluxo (oferta)
+    ap.add_argument("--be-mbps", type=float, default=30.0, help="(env) offered load for BE traffic (mbps)")
+    ap.add_argument("--flow-mbps", type=float, default=80.0, help="(env) offered load for FLOW traffic (mbps)")
+
+    # RTT sampling
+    ap.add_argument("--rtt-samples", type=int, default=80)
+    ap.add_argument("--rtt-interval-ms", type=int, default=50)
+
+    args = ap.parse_args()
+
+    spec = load_json_or_fail(Path(args.spec))
+
+    # ---------- INTENT (spec) ----------
+    req = spec.get("requirements", {}) or {}
+    lat = req.get("latency", {}) or {}
+    bw = req.get("bandwidth", {}) or {}
+    pr = (req.get("priority", {}) or {}).get("level", "medium")
+
+    intent = {
+        "latency_pctl": str(lat.get("percentile", "P99")).upper(),
+        "latency_max_ms": float(lat.get("max_ms", 0)),
+        "bandwidth_min_mbps": float(bw.get("min_mbps", 0)),
+        "bandwidth_max_mbps": float(bw.get("max_mbps", 0)),
+        "priority": str(pr).lower(),
+    }
+
+    # ---------- fixed endpoints for S1 ----------
+    ns_flow_src = "h1"
+    ns_flow_dst = "h2"
+    ns_be_dst = "h3"
+
+    host_ip = {"h1": "10.0.0.1", "h2": "10.0.0.2", "h3": "10.0.0.3"}
+
+    ip_flow_dst = host_ip[ns_flow_dst]
+    ip_be_dst = host_ip[ns_be_dst]
+
+    # ---------- sanity: namespaces must exist ----------
+    ns_list = run(["ip", "netns", "list"], check=False, capture=True) or ""
+    for ns in (ns_flow_src, ns_flow_dst, ns_be_dst):
+        if ns not in ns_list:
+            raise RuntimeError(
+                f"Missing namespace '{ns}'. Did you run scripts/s1_topology_setup.sh? "
+                f"ip netns list:\n{ns_list}"
+            )
+
+    # ---------- backends & targets ----------
+    backends = get_backends(args.backend)
+    B_mods = backends["B"]
+    C_mods = backends["C"]
+
+    real_cfg: Dict[str, Any] = {}
+    if args.backend == "real":
+        real_cfg = _load_real_targets_yaml()
+
+    target_B = (real_cfg.get("B", {}) or {}).get("target") if args.backend == "real" else None
+    target_C = (real_cfg.get("C", {}) or {}).get("target") if args.backend == "real" else None
+
+    # garante dst_ip p/ C (fluxo de interesse)
+    if isinstance(target_C, dict) and "dst_ip" not in target_C:
+        target_C = dict(target_C)
+        target_C["dst_ip"] = ip_flow_dst
+
+    # ---------- artefatos ----------
+    ts = utc_ts()
+
+    pre_flow = RES_DIR / f"S1_{ts}_preflight_flow.txt"
+    rtt_csv = RES_DIR / f"S1_{ts}_rtt_flow.csv"
+
+    ipf_flow = RES_DIR / f"S1_{ts}_iperf_flow.json"
+    ipf_be = RES_DIR / f"S1_{ts}_iperf_be.json"
+
+    domA = RES_DIR / f"S1_{ts}_dom_A.json"
+    domB = RES_DIR / f"S1_{ts}_dom_B.json"
+    domC = RES_DIR / f"S1_{ts}_dom_C.json"
+
+    tc_dump_A = RES_DIR / f"S1_{ts}_tc_dump_A.txt"
+    netconf_dump_B = RES_DIR / f"S1_{ts}_netconf_dump_B.txt"
+    p4_dump_C = RES_DIR / f"S1_{ts}_p4_dump_C.txt"
+
+    summary = RES_DIR / f"S1_{ts}.json"
+
+    s1: Dict[str, Any] = {
+        "scenario": "S1_unicast_qos",
+        "timestamp_utc": ts,
+        "mode": args.mode,
+        "backend_mode": args.backend,
+        "spec_path": str(Path(args.spec)),
+        "intent": intent,
+        "environment": {
+            "bwA_mbps": args.bwA,
+            "bwB_mbps": args.bwB,
+            "bwC_mbps": args.bwC,
+            "delay_ms": args.delay_ms,
+            "be_mbps": args.be_mbps,
+            "flow_mbps": args.flow_mbps,
+        },
+        "endpoints": {
+            "flow": {"src": ns_flow_src, "dst": ns_flow_dst, "dst_ip": ip_flow_dst},
+            "be": {"src": ns_flow_src, "dst": ns_be_dst, "dst_ip": ip_be_dst},
+        },
+        "targets": {
+            "B": _mask_secret(target_B or {}) if target_B else None,
+            "C": _mask_secret(target_C or {}) if target_C else None,
+        },
+        "backend_apply": {"A": False, "B": False, "C": False},
+        "artifacts": {
+            "domA_json": str(domA),
+            "domB_json": str(domB),
+            "domC_json": str(domC),
+            "preflight_flow": str(pre_flow),
+            "rtt_flow_csv": str(rtt_csv),
+            "iperf_flow_json": str(ipf_flow),
+            "iperf_be_json": str(ipf_be),
+            "tc_dump_A_txt": str(tc_dump_A),
+            "netconf_dump_B_txt": str(netconf_dump_B),
+            "p4_dump_C_txt": str(p4_dump_C),
+            "summary_json": str(summary),
+        },
+    }
+
+    # ---------- preflight ----------
+    out = run(["ping", "-n", "-c", "3", ip_flow_dst], ns=ns_flow_src, check=False, capture=True) or ""
+    pre_flow.write_text(out)
+
+    # ---------- Domain A (tc) ----------
+    domA_info: Dict[str, Any] = {
+        "backend": "linux_tc_local",
+        "applied": False,
+        "env_params": {"bwA_mbps": args.bwA},
+        "intent_seen": intent,
+        "commands": [],
+        "readback": {},
+    }
+
+    if args.mode == "adapt":
+        ev = tc_apply_h1_for_s1(
+            ns=ns_flow_src,
+            dev=f"{ns_flow_src}-eth0",
+            link_mbps=float(args.bwA),
+            flow_dst_ip=ip_flow_dst,
+            flow_min_mbps=float(intent["bandwidth_min_mbps"]),
+            flow_max_mbps=float(intent["bandwidth_max_mbps"]),
+        )
+        domA_info["applied"] = True
+        domA_info["commands"] = ev["commands"]
+        domA_info["readback"] = ev["readback"]
+        tc_dump_A.write_text(
+            "### tc qdisc\n" + (ev["readback"].get("qdisc") or "") +
+            "\n\n### tc class\n" + (ev["readback"].get("class") or "") +
+            "\n\n### tc filter\n" + (ev["readback"].get("filter") or "") + "\n"
+        )
+    else:
+        tc_dump_A.write_text("[baseline] no tc changes applied\n")
+
+    safe_dump_json(domA, domA_info)
+    s1["backend_apply"]["A"] = bool(domA_info["applied"])
+
+    # ---------- Domain B ----------
+    domB_info: Dict[str, Any] = {
+        "backend_chain": [getattr(m, "__name__", str(m)) for m in (B_mods if isinstance(B_mods, (list, tuple)) else [B_mods])],
+        "applied": False,
+        "env_params": {"bwB_mbps": args.bwB},
+        "target": _mask_secret(target_B or {}) if target_B else None,
+        "responses": [],
+    }
+    if args.mode == "adapt":
+        aggB = _apply_backend_chain(B_mods, domain_ctx={"name": "B"}, intent=intent, target=target_B)
+        domB_info.update(aggB)
+
+        dumped = False
+        for r in domB_info.get("responses", []):
+            info = r.get("response")
+            if isinstance(info, dict) and info.get("running_snapshot"):
+                netconf_dump_B.write_text(str(info.get("running_snapshot")))
+                dumped = True
+                break
+        if not dumped:
+            netconf_dump_B.write_text("[no_dump] backend returned empty running_snapshot\n")
+    else:
+        netconf_dump_B.write_text("[baseline] no netconf changes applied\n")
+
+    safe_dump_json(domB, domB_info)
+    s1["backend_apply"]["B"] = bool(domB_info.get("applied", False))
+
+    # ---------- Domain C ----------
+    domC_info: Dict[str, Any] = {
+        "backend_chain": [getattr(m, "__name__", str(m)) for m in (C_mods if isinstance(C_mods, (list, tuple)) else [C_mods])],
+        "applied": False,
+        "env_params": {"bwC_mbps": args.bwC},
+        "target": _mask_secret(target_C or {}) if target_C else None,
+        "readback_dump": None,
+        "responses": [],
+    }
+    if args.mode == "adapt":
+        aggC = _apply_backend_chain(C_mods, domain_ctx={"name": "C"}, intent=intent, target=target_C)
+        domC_info.update(aggC)
+
+        dump_txt = None
+        for r in domC_info.get("responses", []):
+            info = r.get("response")
+            if isinstance(info, dict) and info.get("readback_dump"):
+                dump_txt = info.get("readback_dump")
+                break
+
+        if dump_txt:
+            domC_info["readback_dump"] = "[embedded]"
+            p4_dump_C.write_text(str(dump_txt))
+        else:
+            domC_info["readback_dump"] = "[no_dump]"
+            p4_dump_C.write_text("[no_dump] backend returned empty readback_dump\n")
+    else:
+        p4_dump_C.write_text("[baseline] no p4 changes applied\n")
+
+    safe_dump_json(domC, domC_info)
+    s1["backend_apply"]["C"] = bool(domC_info.get("applied", False))
+
+    # ---------- Traffic (FLOW + BE) concurrently ----------
+    # Servers
+    srv_flow = start_iperf_server(ns_flow_dst, bind_ip=ip_flow_dst, port=5201)
+    srv_be = start_iperf_server(ns_be_dst, bind_ip=ip_be_dst, port=5202)
+
+    if not _wait_iperf_listen(ns_flow_dst, 5201):
+        serr = srv_flow.stderr.read() if srv_flow.stderr else ""
+        safe_dump_json(ipf_flow, {"error": "iperf_flow_server_not_ready", "server_stderr": serr})
+        try:
+            srv_flow.kill()
+        except Exception:
+            pass
+
+    if not _wait_iperf_listen(ns_be_dst, 5202):
+        serr = srv_be.stderr.read() if srv_be.stderr else ""
+        safe_dump_json(ipf_be, {"error": "iperf_be_server_not_ready", "server_stderr": serr})
+        try:
+            srv_be.kill()
+        except Exception:
+            pass
+
+    # Clients concurrently (two Popen)
+    # Capturamos JSON via stdout e só parseamos no final.
+    cli_flow = subprocess.Popen(
+        ["ip", "netns", "exec", ns_flow_src, "iperf3",
+         "-c", ip_flow_dst, "-p", "5201", "-t", str(args.duration), "-b", f"{args.flow_mbps}M", "--json"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    cli_be = subprocess.Popen(
+        ["ip", "netns", "exec", ns_flow_src, "iperf3",
+         "-c", ip_be_dst, "-p", "5202", "-t", str(args.duration), "-b", f"{args.be_mbps}M", "--json"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+    out_flow, err_flow = cli_flow.communicate()
+    out_be, err_be = cli_be.communicate()
+
+    def _save_iperf(out_json: Path, stdout: str, stderr: str) -> None:
+        if stdout.strip().startswith("{"):
+            try:
+                out_json.write_text(json.dumps(json.loads(stdout), ensure_ascii=False, indent=2))
+                return
+            except Exception:
+                pass
+        safe_dump_json(out_json, {"error": "iperf_client_failed", "stdout": stdout, "stderr": stderr})
+
+    _save_iperf(ipf_flow, out_flow, err_flow)
+    _save_iperf(ipf_be, out_be, err_be)
+
+    # Wait servers
+    try:
+        srv_flow.wait(timeout=2)
+    except Exception:
+        try:
+            srv_flow.kill()
+        except Exception:
+            pass
+    try:
+        srv_be.wait(timeout=2)
+    except Exception:
+        try:
+            srv_be.kill()
+        except Exception:
+            pass
+
+    # ---------- RTT (FLOW) ----------
+    ok, req = collect_rtt_csv(
+        ns=ns_flow_src,
+        dst_ip=ip_flow_dst,
+        samples=int(args.rtt_samples),
+        out_csv=rtt_csv,
+        interval_ms=int(args.rtt_interval_ms),
+    )
+
+    rtt_pctl = intent["latency_pctl"]
+    rtt_pctl_ms, n_rtt = rtt_percentile(rtt_csv, rtt_pctl)
+
+    flow_j = json.loads(ipf_flow.read_text()) if ipf_flow.exists() else {"error": "missing"}
+    be_j = json.loads(ipf_be.read_text()) if ipf_be.exists() else {"error": "missing"}
+
+    flow_tp = parse_iperf_mbps(flow_j)
+    be_tp = parse_iperf_mbps(be_j)
+
+    # ---------- conformance ----------
+    latency_ok = (rtt_pctl_ms <= float(intent["latency_max_ms"])) if n_rtt > 0 else False
+
+    # bandwidth_ok considera o FLOW (não BE)
+    bw_min = float(intent["bandwidth_min_mbps"])
+    bw_max = float(intent["bandwidth_max_mbps"])
+    bandwidth_ok = (flow_tp is not None) and (bw_min <= float(flow_tp) <= bw_max)
+
+    intent_ok = bool(latency_ok and bandwidth_ok)
+
+    s1["metrics"] = {
+        "rtt_pctl": rtt_pctl,
+        "rtt_pctl_ms": rtt_pctl_ms,
+        "rtt_n": n_rtt,
+        "delivery_ratio": round(ok / req, 3) if req else 0.0,
+        "flow_throughput_mbps": flow_tp,
+        "be_throughput_mbps": be_tp,
+    }
+    s1["conformance"] = {
+        "latency_ok": latency_ok,
+        "bandwidth_ok": bandwidth_ok,
+        "intent_ok": intent_ok,
+    }
+
+    safe_dump_json(summary, s1)
+    print(json.dumps(s1, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

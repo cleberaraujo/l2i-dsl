@@ -1,0 +1,10 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "org.test",
+  "scope": "demo",
+  "flow": { "id": "TestFlow" },
+  "requirements": {
+    "latency": { "max_ms": 30, "percentile": "P99" }
+  },
+  "target_profile": "default"
+}

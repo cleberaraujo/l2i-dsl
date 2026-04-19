@@ -1,0 +1,21 @@
+{
+  "profile_id": "domC-universal",
+  "description": "Domain C - permissive profile for tests (P4-like capable)",
+  "queues": {
+    "max_queues": 8,
+    "modes": {
+      "strict": true,
+      "wfq": { "supported": true, "weights_min": 1, "weights_max": 128 }
+    }
+  },
+  "meters": {
+    "supported": true,
+    "types": ["tbf","trtcm"],
+    "min_rate_mbps": 1,
+    "max_rate_mbps": 10000
+  },
+  "multicast": { "mode": "l2mc_static", "max_groups": 1024, "max_replications_per_group": 128 },
+  "ports": [ { "name": "edge", "speed_mbps": 1000 } ],
+  "atomic_commit": true,
+  "telemetry": { "rtt_percentile": true, "throughput_sustained": true, "queue_occupancy": true, "delivery_ratio": true }
+}

@@ -1,0 +1,174 @@
+/* l2i_minimal.p4 – v1model/BMv2 (BMv2)
+ * Tabelas e AÇÕES dentro do MyIngress para acessar hdr/meta
+ */
+
+#include <core.p4>
+#include <v1model.p4>
+
+const bit<16> ETHERTYPE_IPV4 = 0x0800;
+
+/* ---------- HEADERS ---------- */
+header ethernet_t {
+    bit<48> dstAddr;
+    bit<48> srcAddr;
+    bit<16> etherType;
+}
+
+header ipv4_t {
+    bit<4>  version;
+    bit<4>  ihl;
+    bit<8>  diffserv;
+    bit<16> totalLen;
+    bit<16> identification;
+    bit<3>  flags;
+    bit<13> fragOffset;
+    bit<8>  ttl;
+    bit<8>  protocol;
+    bit<16> hdrChecksum;
+    bit<32> srcAddr;
+    bit<32> dstAddr;
+}
+
+header udp_t {
+    bit<16> srcPort;
+    bit<16> dstPort;
+    bit<16> length_;
+    bit<16> checksum;
+}
+
+/* ---------- STRUCTS ---------- */
+struct metadata_t {
+    bit<16> mcast_grp;
+}
+
+struct headers_t {
+    ethernet_t ethernet;
+    ipv4_t     ipv4;
+    udp_t      udp;
+}
+
+/* ---------- PARSER ---------- */
+parser MyParser(packet_in pkt,
+                out headers_t hdr,
+                inout metadata_t meta,
+                inout standard_metadata_t stdmeta)
+{
+    state start {
+        pkt.extract(hdr.ethernet);
+        transition select(hdr.ethernet.etherType) {
+            ETHERTYPE_IPV4: parse_ipv4;
+            default: accept;
+        }
+    }
+
+    state parse_ipv4 {
+        pkt.extract(hdr.ipv4);
+        transition select(hdr.ipv4.protocol) {
+            17: parse_udp;     // UDP
+            default: accept;
+        }
+    }
+
+    state parse_udp {
+        pkt.extract(hdr.udp);
+        transition accept;
+    }
+}
+
+/* ---------- CONTROLS ---------- */
+control MyVerifyChecksum(inout headers_t hdr, inout metadata_t meta) { apply { } }
+control MyComputeChecksum(inout headers_t hdr, inout metadata_t meta) { apply { } }
+
+control MyIngress(inout headers_t hdr,
+                  inout metadata_t meta,
+                  inout standard_metadata_t stdmeta)
+{
+    /* ---- AÇÕES (no escopo do control) ---- */
+    action set_dscp(bit<6> new_dscp) {
+        if (hdr.ipv4.isValid()) {
+            // preserva ECN (2 bits baixos) e troca somente DSCP (6 bits altos)
+            /* new_dscp : bit<6>
+             * hdr.ipv4.diffserv : bit<8>
+             * objetivo: diffserv[7:2] = new_dscp; diffserv[1:0] preservados
+             */
+            bit<8> new_diffserv;
+            new_diffserv = hdr.ipv4.diffserv;     // começa preservando o valor atual
+            new_diffserv[7:2] = new_dscp;         // grava os 6 bits altos (DSCP)
+            hdr.ipv4.diffserv = new_diffserv;     // commit no cabeçalho
+        }
+    }
+
+    action set_mcast(bit<16> grp) {
+        meta.mcast_grp = grp;
+    }
+
+    action nop() { }
+
+    /* ---- TABELAS ---- */
+    table tbl_set_dscp {
+        key = {
+            hdr.ipv4.srcAddr : exact;
+            hdr.ipv4.dstAddr : exact;
+            hdr.udp.dstPort  : exact;
+        }
+        actions = {
+            set_dscp;
+            nop;
+        }
+        size = 1024;
+        default_action = nop();
+    }
+
+    table tbl_route_mcast {
+        key = {
+            hdr.ipv4.dstAddr : exact;
+        }
+        actions = {
+            set_mcast;
+            nop;
+        }
+        size = 1024;
+        default_action = nop();
+    }
+
+    /* ---- LÓGICA ---- */
+    apply {
+        // zera o grupo por padrão
+        meta.mcast_grp = 0;
+
+        if (hdr.ipv4.isValid()) {
+            tbl_set_dscp.apply();
+            tbl_route_mcast.apply();
+
+            if (meta.mcast_grp != 0) {
+                stdmeta.mcast_grp = meta.mcast_grp;
+            }
+        }
+    }
+}
+
+control MyEgress(inout headers_t hdr,
+                 inout metadata_t meta,
+                 inout standard_metadata_t stdmeta)
+{
+    apply { }
+}
+
+/* ---------- DEPARSE + PIPELINE ---------- */
+control DeparserImpl(packet_out packet, in headers_t hdr) {
+    apply {
+        packet.emit(hdr.ethernet);
+        packet.emit(hdr.ipv4);
+        // packet.emit(hdr.udp); // se existir/for válido
+        // packet.emit(hdr.tcp); // idem
+    }
+}
+
+V1Switch(
+    MyParser(),
+         MyVerifyChecksum(),
+         MyIngress(),
+         MyEgress(),
+         MyComputeChecksum(),
+         DeparserImpl()
+) main;

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/l2i-v0.json",
+  "title": "L2I-v0 Spec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["l2i_version", "tenant", "scope", "flow", "requirements"],
+  "properties": {
+    "l2i_version": { "type": "string", "const": "0.1" },
+    "tenant": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+    "scope":  { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+    "flow": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": { "id": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._:-]{1,128}$" } }
+    },
+    "requirements": {
+      "type": "object", "additionalProperties": false, "minProperties": 1,
+      "properties": {
+        "latency": {
+          "type": "object", "additionalProperties": false, "required": ["max_ms"],
+          "properties": {
+            "max_ms": { "type": "integer", "minimum": 1, "maximum": 10000 },
+            "percentile": { "type": "string", "enum": ["P50","P95","P99"], "default": "P99" }
+          }
+        },
+        "bandwidth": {
+          "type": "object", "additionalProperties": false, "required": ["min_mbps"],
+          "properties": {
+            "min_mbps":  { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000 },
+            "max_mbps":  { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000 },
+            "burst_mbps":{ "type": "number", "exclusiveMinimum": 0, "maximum": 1000000 }
+          }
+        },
+        "priority": {
+          "type": "object", "additionalProperties": false, "required": ["level"],
+          "properties": { "level": { "type": "string", "enum": ["critical","high","medium","low"] } }
+        },
+        "multicast": {
+          "type": "object", "additionalProperties": false, "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "group_id": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "created_at": { "type": "string", "format": "date-time" },
+        "labels": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 32 }
+      }
+    },
+    "target_profile": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
+  }
+}

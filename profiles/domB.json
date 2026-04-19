@@ -1,0 +1,21 @@
+{
+  "profile_id": "domB-universal",
+  "description": "Domain B - permissive profile for tests (WFQ/HTB supported)",
+  "queues": {
+    "max_queues": 8,
+    "modes": {
+      "strict": true,
+      "wfq": { "supported": true, "weights_min": 1, "weights_max": 64 }
+    }
+  },
+  "meters": {
+    "supported": true,
+    "types": ["tbf","trtcm"],
+    "min_rate_mbps": 1,
+    "max_rate_mbps": 1000
+  },
+  "multicast": { "mode": "l2mc_static", "max_groups": 512, "max_replications_per_group": 32 },
+  "ports": [ { "name": "bottleneck", "speed_mbps": 100 } ],
+  "atomic_commit": false,
+  "telemetry": { "rtt_percentile": true, "throughput_sustained": true, "queue_occupancy": true, "delivery_ratio": true }
+}

@@ -1,0 +1,9 @@
+{
+  "profile_id": "p4-bmv2-basic",
+  "queues": { "max_queues": 8, "modes": { "strict": true, "wfq": { "supported": true, "weights_min": 1, "weights_max": 100 } } },
+  "meters": { "supported": true, "types": ["trtcm"], "min_rate_mbps": 1, "max_rate_mbps": 40000 },
+  "multicast": { "mode": "l2mc_static", "max_groups": 1024, "max_replications_per_group": 128 },
+  "ports": [ { "name": "p1", "speed_mbps": 10000 }, { "name": "p2", "speed_mbps": 10000 } ],
+  "atomic_commit": true,
+  "telemetry": { "rtt_percentile": true, "throughput_sustained": true, "queue_occupancy": true, "delivery_ratio": true }
+}

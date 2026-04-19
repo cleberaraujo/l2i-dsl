@@ -1,0 +1,44 @@
+module l2i-qos {
+  yang-version 1.1;
+  namespace "urn:l2i:qos";
+  prefix l2iq;
+
+  organization
+    "L2i - Link-Layer Intent-based Adaptation";
+
+  contact
+    "Antonio Cleber Araujo (projeto de pesquisa L2i - INSERT UFBA)";
+
+  description
+    "Modelo simples de QoS para experimentos L2i em NETCONF.
+     Mapeia intents de QoS (classe, min/max Mbps) para um container
+     gerenciado via edit-config.";
+
+  revision "2025-11-20" {
+    description
+      "Versão inicial para uso em laboratório com netopeer2/sysrepo.";
+  }
+
+  container qos {
+    description
+      "Parâmetros de QoS aplicados pelo mecanismo de adaptação da L2i.";
+
+    leaf class {
+      type string;
+      description
+        "Classe lógica de QoS (p.ex. 'prio10', 'gold', 'video_hd').";
+    }
+
+    leaf min-mbps {
+      type uint32;
+      description
+        "Largura de banda mínima garantida, em Mbps.";
+    }
+
+    leaf max-mbps {
+      type uint32;
+      description
+        "Largura de banda máxima (pico), em Mbps.";
+    }
+  }
+}

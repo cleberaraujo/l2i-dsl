@@ -1,0 +1,25 @@
+<nacm xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-acm">
+  <enable-nacm>true</enable-nacm>
+
+  <read-default>permit</read-default>
+  <write-default>permit</write-default>
+  <exec-default>permit</exec-default>
+
+  <groups>
+    <group>
+      <name>netconf-group</name>
+      <user-name>netconf</user-name>
+    </group>
+  </groups>
+
+  <rule-list>
+    <name>netconf-all-l2i</name>
+    <group>netconf-group</group>
+    <rule>
+      <name>permit-l2i-qos-all</name>
+      <module-name>l2i-qos</module-name>
+      <access-operations>*</access-operations>
+      <action>permit</action>
+    </rule>
+  </rule-list>
+</nacm>

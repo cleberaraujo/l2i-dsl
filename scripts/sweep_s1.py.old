@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Sweep S1 (atualizado):
+- Executa S1 em baseline/adapt e mock/real
+- Gera:
+  - CSV compare (agregado por (backend,bwB,be))
+  - JSONL dump (1 linha por execução -> auditoria científica)
+- Evita reexecução espúria: só reexecuta se RC != 0 ou se não conseguiu obter summary
+- Fallback: se summary não tiver algum campo, tenta derivar de artefatos (iperf, rtt csv) se existirem.
+
+Uso típico (como você fazia):
+  sudo python3 scripts/sweep_s1.py \
+    --spec specs/valid/s1_unicast_qos.json \
+    --duration 30 \
+    --bwB 100 50 25 10 \
+    --be 10 30 60 90
+
+Por padrão:
+- bwA=100, bwC=100, delay_ms=1
+- roda backend: mock e real
+- roda modos: baseline e adapt
+"""
+
+import argparse
+import csv
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, List
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RES_S1 = ROOT / "results" / "S1"
+RES_CMP = ROOT / "results" / "compare"
+RES_S1.mkdir(parents=True, exist_ok=True)
+RES_CMP.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------- util ----------------
+
+def utc_ts() -> str:
+    # timezone-aware, consistente com S2
+    import datetime
+    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _tail(s: str, n: int = 1200) -> str:
+    s = s or ""
+    return s[-n:]
+
+
+def _read_json(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _latest_summary(after_epoch: float) -> Optional[Path]:
+    """
+    Encontra o summary mais recente do S1 (arquivo S1_{TS}.json),
+    ignorando dom_*.json e outros.
+    """
+    cand = []
+    for p in RES_S1.glob("S1_*.json"):
+        name = p.name
+        if "_dom_" in name:
+            continue
+        try:
+            st = p.stat()
+            if st.st_mtime >= after_epoch:
+                cand.append((st.st_mtime, p))
+        except Exception:
+            pass
+    if not cand:
+        return None
+    cand.sort(key=lambda x: x[0])
+    return cand[-1][1]
+
+
+def _pick_metric(summary: Dict[str, Any], keys: List[str]) -> Any:
+    """
+    Busca por chaves possíveis em estruturas diferentes.
+    Ex.: ["metrics.throughput_B_mbps", "metrics.throughput_mbps", "throughput_mbps"]
+    """
+    cur: Any
+    for k in keys:
+        cur = summary
+        ok = True
+        for part in k.split("."):
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            else:
+                ok = False
+                break
+        if ok:
+            return cur
+    return None
+
+
+def _parse_iperf_mbps_from_file(path: Path) -> Optional[float]:
+    j = _read_json(path)
+    if not isinstance(j, dict):
+        return None
+    if j.get("error"):
+        return None
+    try:
+        bps = j["end"]["sum_received"]["bits_per_second"]
+        if not bps:
+            return None
+        return round(float(bps) / 1e6, 3)
+    except Exception:
+        return None
+
+
+def _rtt_stats_from_csv(path: Path) -> Optional[Dict[str, float]]:
+    if not path.exists():
+        return None
+    vals: List[float] = []
+    try:
+        with path.open() as f:
+            rd = csv.DictReader(f)
+            for r in rd:
+                try:
+                    vals.append(float(r.get("rtt_ms", "")))
+                except Exception:
+                    pass
+    except Exception:
+        return None
+
+    if not vals:
+        return None
+
+    vals.sort()
+
+    def pct(p: float) -> float:
+        k = (len(vals) - 1) * p
+        i = int(k)
+        d = k - i
+        if i + 1 < len(vals):
+            return vals[i] * (1 - d) + vals[i + 1] * d
+        return vals[i]
+
+    return {
+        "p50": round(pct(0.50), 1),
+        "p95": round(pct(0.95), 1),
+        "p99": round(pct(0.99), 1),
+        "n": int(len(vals)),
+    }
+
+
+@dataclass
+class RunResult:
+    backend: str
+    mode: str
+    bwB: float
+    be_mbps: float
+    rc: int
+    elapsed_s: float
+    summary_path: Optional[str]
+    summary: Optional[Dict[str, Any]]
+    thr_mbps: Optional[float]
+    delivery: Optional[float]
+    rtt: Optional[Dict[str, float]]
+    stdout_tail: str
+    stderr_tail: str
+
+
+def _extract_metrics(summary: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[Dict[str, float]]]:
+    """
+    Extrai throughput/delivery/rtt do summary, com tolerância a variações:
+    - throughput: tenta chaves típicas de S1 e S2
+    - delivery: tenta delivery_ratio (ou similar)
+    - rtt: tenta rtt_{B,C} ou rtt (se existir)
+    """
+    thr = _pick_metric(summary, [
+        "metrics.throughput_mbps",
+        "metrics.throughput_B_mbps",
+        "metrics.throughput_C_mbps",
+        "throughput_mbps",
+    ])
+
+    delivery = _pick_metric(summary, [
+        "metrics.delivery_ratio",
+        "metrics.delivery_ratio_B",
+        "delivery_ratio",
+    ])
+
+    rtt = _pick_metric(summary, [
+        "metrics.rtt",
+        "metrics.rtt_B",
+        "rtt",
+    ])
+
+    # Normaliza tipos
+    try:
+        thr = float(thr) if thr is not None else None
+    except Exception:
+        thr = None
+
+    try:
+        delivery = float(delivery) if delivery is not None else None
+    except Exception:
+        delivery = None
+
+    if not isinstance(rtt, dict):
+        rtt = None
+
+    return thr, delivery, rtt
+
+
+def _fallback_from_artifacts(summary: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[Dict[str, float]]]:
+    """
+    Se o summary não trouxer métricas, tenta derivar dos artefatos.
+    Depende de como o S1 grava paths. Tentamos algumas chaves comuns.
+    """
+    artifacts = summary.get("artifacts") if isinstance(summary, dict) else None
+    if not isinstance(artifacts, dict):
+        return None, None, None
+
+    # iperf pode estar em iperf_B_json/iperf_C_json/iperf_json etc.
+    ipf_path = None
+    for k in ["iperf_json", "iperf_B_json", "iperf_C_json"]:
+        v = artifacts.get(k)
+        if isinstance(v, str) and v:
+            ipf_path = Path(v)
+            break
+
+    thr = _parse_iperf_mbps_from_file(ipf_path) if ipf_path else None
+
+    # rtt csv (tenta vários nomes)
+    rtt_path = None
+    for k in ["rtt_csv", "rtt_B_csv", "rtt_C_csv"]:
+        v = artifacts.get(k)
+        if isinstance(v, str) and v:
+            rtt_path = Path(v)
+            break
+    rtt = _rtt_stats_from_csv(rtt_path) if rtt_path else None
+
+    # delivery ratio: se rtt tem n>0, assume delivery ~1.0; se S1 grava explicitamente, preferimos isso
+    delivery = None
+    if rtt and rtt.get("n", 0) > 0:
+        delivery = 1.0
+
+    return thr, delivery, rtt
+
+
+def run_one(spec: str,
+            duration: int,
+            backend: str,
+            mode: str,
+            bwA: float,
+            bwB: float,
+            bwC: float,
+            delay_ms: float,
+            be_mbps: float,
+            python_bin: str,
+            retries: int = 1,
+            settle_s: float = 0.2) -> RunResult:
+
+    cmd = [
+        python_bin, "-m", "scenarios.multidomain_s1",
+        "--spec", spec,
+        "--duration", str(duration),
+        "--be-mbps", str(be_mbps),
+        "--bwA", str(bwA),
+        "--bwB", str(bwB),
+        "--bwC", str(bwC),
+        "--delay-ms", str(delay_ms),
+        "--mode", mode,
+        "--backend", backend,
+    ]
+
+    last_rc = 1
+    last_out = ""
+    last_err = ""
+    start_epoch = time.time()
+
+    summary_path: Optional[Path] = None
+    summary_obj: Optional[Dict[str, Any]] = None
+
+    t0 = time.time()
+    for attempt in range(1, retries + 1):
+        p0 = time.time()
+        proc = subprocess.run(cmd, text=True, capture_output=True)
+        elapsed = time.time() - p0
+
+        last_rc = proc.returncode
+        last_out = proc.stdout or ""
+        last_err = proc.stderr or ""
+
+        # dá um tempo pro FS “assentar”
+        time.sleep(settle_s)
+
+        # só consideramos “sucesso” se achou e parseou o summary
+        s = _latest_summary(after_epoch=start_epoch)
+        if last_rc == 0 and s and s.exists():
+            summary_path = s
+            summary_obj = _read_json(s)
+            if isinstance(summary_obj, dict):
+                break  # ok
+
+        # se falhou e ainda tem retry, tenta de novo
+        if attempt < retries:
+            time.sleep(0.3)
+
+    total_elapsed = time.time() - t0
+
+    thr = delivery = None
+    rtt = None
+
+    if isinstance(summary_obj, dict):
+        thr, delivery, rtt = _extract_metrics(summary_obj)
+
+        # fallback: tenta artefatos
+        if thr is None or rtt is None:
+            f_thr, f_del, f_rtt = _fallback_from_artifacts(summary_obj)
+            thr = thr if thr is not None else f_thr
+            delivery = delivery if delivery is not None else f_del
+            rtt = rtt if rtt is not None else f_rtt
+
+    return RunResult(
+        backend=backend,
+        mode=mode,
+        bwB=bwB,
+        be_mbps=be_mbps,
+        rc=last_rc,
+        elapsed_s=round(total_elapsed, 3),
+        summary_path=str(summary_path) if summary_path else None,
+        summary=summary_obj,
+        thr_mbps=thr,
+        delivery=delivery,
+        rtt=rtt,
+        stdout_tail=_tail(last_out),
+        stderr_tail=_tail(last_err),
+    )
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", required=True)
+    ap.add_argument("--duration", type=int, default=30)
+
+    ap.add_argument("--bwA", type=float, default=100.0)
+    ap.add_argument("--bwC", type=float, default=100.0)
+    ap.add_argument("--delay-ms", type=float, default=1.0)
+
+    ap.add_argument("--bwB", type=float, nargs="+", required=True,
+                    help="lista de bwB (mbps) para varrer")
+    ap.add_argument("--be", type=float, nargs="+", required=True,
+                    help="lista de be_mbps (iperf -b) para varrer")
+
+    ap.add_argument("--backends", choices=["mock", "real", "both"], default="both")
+    ap.add_argument("--modes", choices=["baseline", "adapt", "both"], default="both")
+
+    ap.add_argument("--retries", type=int, default=2)
+    ap.add_argument("--python-bin", default=sys.executable,
+                    help="python a usar (ex.: /home/dev/net-dev/venv/bin/python)")
+
+    args = ap.parse_args()
+
+    backends = ["mock", "real"] if args.backends == "both" else [args.backends]
+    modes = ["baseline", "adapt"] if args.modes == "both" else [args.modes]
+
+    ts = utc_ts()
+    out_csv = RES_CMP / f"SWEEP_S1_COMPARE_{ts}.csv"
+    out_jsonl = RES_CMP / f"SWEEP_S1_DUMP_{ts}.jsonl"
+
+    # Agregado por chave (backend,bwB,be): baseline e adapt no mesmo registro
+    rows: Dict[Tuple[str, float, float], Dict[str, Any]] = {}
+
+    def ensure_row(k: Tuple[str, float, float]) -> Dict[str, Any]:
+        if k not in rows:
+            backend, bwB, be = k
+            rows[k] = {
+                "backend": backend,
+                "bwB": bwB,
+                "be_mbps": be,
+                "thr_baseline": None,
+                "thr_adapt": None,
+                "thr_delta": None,
+                "delivery_baseline": None,
+                "delivery_adapt": None,
+                "delivery_delta": None,
+                "rtt_p50_baseline": None,
+                "rtt_p50_adapt": None,
+                "rtt_p50_delta": None,
+                "rtt_p95_baseline": None,
+                "rtt_p95_adapt": None,
+                "rtt_p95_delta": None,
+                "rtt_p99_baseline": None,
+                "rtt_p99_adapt": None,
+                "rtt_p99_delta": None,
+                "samples_baseline": None,
+                "samples_adapt": None,
+                "rc_baseline": None,
+                "rc_adapt": None,
+                "summary_baseline": None,
+                "summary_adapt": None,
+                "elapsed_baseline_s": None,
+                "elapsed_adapt_s": None,
+            }
+        return rows[k]
+
+    with out_jsonl.open("w", encoding="utf-8") as fj:
+        for backend in backends:
+            for bwB in args.bwB:
+                for be in args.be:
+                    for mode in modes:
+                        rr = run_one(
+                            spec=args.spec,
+                            duration=args.duration,
+                            backend=backend,
+                            mode=mode,
+                            bwA=args.bwA,
+                            bwB=bwB,
+                            bwC=args.bwC,
+                            delay_ms=args.delay_ms,
+                            be_mbps=be,
+                            python_bin=args.python_bin,
+                            retries=args.retries,
+                        )
+
+                        # jsonl “auditoria”
+                        fj.write(json.dumps({
+                            "backend": rr.backend,
+                            "mode": rr.mode,
+                            "bwB": rr.bwB,
+                            "be_mbps": rr.be_mbps,
+                            "rc": rr.rc,
+                            "elapsed_s": rr.elapsed_s,
+                            "summary_path": rr.summary_path,
+                            "thr_mbps": rr.thr_mbps,
+                            "delivery": rr.delivery,
+                            "rtt": rr.rtt,
+                            "stdout_tail": rr.stdout_tail,
+                            "stderr_tail": rr.stderr_tail,
+                        }, ensure_ascii=False) + "\n")
+                        fj.flush()
+
+                        # agrega baseline/adapt no mesmo row
+                        k = (backend, float(bwB), float(be))
+                        row = ensure_row(k)
+
+                        if mode == "baseline":
+                            row["thr_baseline"] = rr.thr_mbps
+                            row["delivery_baseline"] = rr.delivery
+                            row["rc_baseline"] = rr.rc
+                            row["summary_baseline"] = rr.summary_path
+                            row["elapsed_baseline_s"] = rr.elapsed_s
+                            if rr.rtt:
+                                row["rtt_p50_baseline"] = rr.rtt.get("p50")
+                                row["rtt_p95_baseline"] = rr.rtt.get("p95")
+                                row["rtt_p99_baseline"] = rr.rtt.get("p99")
+                                row["samples_baseline"] = rr.rtt.get("n")
+                        elif mode == "adapt":
+                            row["thr_adapt"] = rr.thr_mbps
+                            row["delivery_adapt"] = rr.delivery
+                            row["rc_adapt"] = rr.rc
+                            row["summary_adapt"] = rr.summary_path
+                            row["elapsed_adapt_s"] = rr.elapsed_s
+                            if rr.rtt:
+                                row["rtt_p50_adapt"] = rr.rtt.get("p50")
+                                row["rtt_p95_adapt"] = rr.rtt.get("p95")
+                                row["rtt_p99_adapt"] = rr.rtt.get("p99")
+                                row["samples_adapt"] = rr.rtt.get("n")
+
+                    # calcula deltas (se baseline+adapt existirem)
+                    row = rows[(backend, float(bwB), float(be))]
+                    if row["thr_baseline"] is not None and row["thr_adapt"] is not None:
+                        row["thr_delta"] = round(float(row["thr_adapt"]) - float(row["thr_baseline"]), 3)
+                    if row["delivery_baseline"] is not None and row["delivery_adapt"] is not None:
+                        row["delivery_delta"] = round(float(row["delivery_adapt"]) - float(row["delivery_baseline"]), 3)
+
+                    for p in ["p50", "p95", "p99"]:
+                        b = row.get(f"rtt_{p}_baseline")
+                        a = row.get(f"rtt_{p}_adapt")
+                        if b is not None and a is not None:
+                            row[f"rtt_{p}_delta"] = round(float(a) - float(b), 3)
+
+    # escreve CSV
+    cols = [
+        "backend", "bwB", "be_mbps",
+        "thr_baseline", "thr_adapt", "thr_delta",
+        "delivery_baseline", "delivery_adapt", "delivery_delta",
+        "rtt_p50_baseline", "rtt_p50_adapt", "rtt_p50_delta",
+        "rtt_p95_baseline", "rtt_p95_adapt", "rtt_p95_delta",
+        "rtt_p99_baseline", "rtt_p99_adapt", "rtt_p99_delta",
+        "samples_baseline", "samples_adapt",
+        "rc_baseline", "rc_adapt",
+        "elapsed_baseline_s", "elapsed_adapt_s",
+        "summary_baseline", "summary_adapt",
+    ]
+
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        wr = csv.DictWriter(f, fieldnames=cols)
+        wr.writeheader()
+        for k in sorted(rows.keys()):
+            wr.writerow({c: rows[k].get(c) for c in cols})
+
+    print(f"[ok] compare: {out_csv}")
+    print(f"[ok] dump:    {out_jsonl}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+{
+  "profile_id": "domB-wfq-mid",
+  "description": "Domain B - WFQ, bottleneck 50Mbps mid-fabric",
+  "queues": { "max_queues": 8,
+    "modes": { "strict": true, "wfq": { "supported": true, "weights_min": 1, "weights_max": 16 } } },
+  "meters": { "supported": true, "types": ["tbf"], "min_rate_mbps": 1, "max_rate_mbps": 200 },
+  "multicast": { "mode": "none", "max_groups": 0, "max_replications_per_group": 0 },
+  "ports": [ { "name": "bottleneck", "speed_mbps": 50 } ],
+  "atomic_commit": false,
+  "telemetry": { "rtt_percentile": true, "throughput_sustained": true, "queue_occupancy": true, "delivery_ratio": false }
+}

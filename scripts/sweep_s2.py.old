@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+sweep_s2.py
+Varre parâmetros do S2 (bwB × be_mbps), rodando baseline/adapt e mock/real, e gera CSV único.
+
+Princípio científico:
+- --spec descreve a INTENÇÃO.
+- --bwA/--bwB/--bwC/--delay-ms e --be-mbps descrevem o AMBIENTE experimental (testbed)
+  e a carga gerada (tráfego), tipicamente controlados pelo operador.
+
+Exemplos:
+
+1) Sweep padrão (mock e real, baseline e adapt):
+  sudo /home/dev/net-dev/venv/bin/python scripts/sweep_s2.py \
+    --python /home/dev/net-dev/venv/bin/python \
+    --sudo \
+    --spec specs/valid/s2_multicast_source_oriented.json \
+    --duration 30 \
+    --bwA 100 --bwC 100 --delay-ms 1 \
+    --bwB 100 50 25 10 \
+    --be 10 30 60 90 \
+    --backends mock real \
+    --modes baseline adapt
+
+2) Sweep só em real:
+  sudo /home/dev/net-dev/venv/bin/python scripts/sweep_s2.py \
+    --python /home/dev/net-dev/venv/bin/python \
+    --sudo \
+    --spec specs/valid/s2_multicast_source_oriented.json \
+    --duration 30 \
+    --bwA 100 --bwC 100 --delay-ms 1 \
+    --bwB 100 50 25 10 \
+    --be 10 30 60 90 \
+    --backends real \
+    --modes baseline adapt
+
+Saídas:
+- results/compare/SWEEP_S2_<TS>.csv
+- (opcional) results/compare/SWEEP_S2_<TS>_runs.jsonl com o JSON completo de cada execução (1 por linha)
+"""
+
+import argparse
+import datetime as dt
+import json
+import shlex
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+MOD = "scenarios.multicast_s2"
+
+
+# ------------------ time ------------------
+
+def utc_ts() -> str:
+    # timezone-aware (evita DeprecationWarning no Python 3.12+)
+    return dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+# ------------------ shell helpers ------------------
+
+def bash_one_liner(script: str) -> List[str]:
+    return ["bash", "-lc", script]
+
+
+def sh(cmd: List[str], check: bool = True, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=check)
+
+
+# ------------------ cleanup (opt-in) ------------------
+# IMPORTANT:
+# Seu ambiente já mudou (ex.: h5 pode não existir). Então este cleanup é conservador.
+# Use --cleanup apenas se você realmente precisa reinicializar artefatos entre rodadas.
+
+CLEAN_SCRIPT = r"""
+# namespaces (remover apenas os que existirem)
+for ns in h1 h2 h3 h4 h5; do
+  ip netns del "$ns" 2>/dev/null || true
+done
+
+# bridges
+for br in brA brB brC; do
+  ip link del "$br" 2>/dev/null || true
+done
+
+# veth pares comuns (novos e antigos)
+for v in A-B B-A A-C C-A B-C C-B A_B_A A_B_B A_C_A A_C_C; do
+  ip link del "$v" 2>/dev/null || true
+done
+
+# taps (novos e antigos)
+for t in tap_h1-eth0 tap_h2-eth0 tap_h3-eth0 tap_h4-eth0 tap_h5-eth0 tapA1 tapB3 tapC4 tapC5; do
+  ip link del "$t" 2>/dev/null || true
+done
+
+# ifaces de host que podem ter ficado soltas
+for i in h1-eth0 h2-eth0 h3-eth0 h4-eth0 h5-eth0; do
+  ip link del "$i" 2>/dev/null || true
+done
+"""
+
+
+def cleanup(enabled: bool) -> None:
+    if not enabled:
+        return
+    try:
+        sh(bash_one_liner(CLEAN_SCRIPT), check=False, timeout=8)
+        time.sleep(0.15)  # dá um respiro pro kernel “assentar” as remoções
+    except Exception:
+        pass
+
+
+# ------------------ JSON robusto ------------------
+
+def extract_last_json(stdout: str) -> Dict[str, Any]:
+    """
+    Procura o ÚLTIMO objeto JSON bem balanceado em stdout.
+    Evita 'Extra data' quando há logs antes/depois.
+    """
+    s = stdout
+
+    # Tentativa rápida: do último '{' ao último '}'
+    last_start = s.rfind("{")
+    last_end = s.rfind("}")
+    if last_start != -1 and last_end != -1 and last_end > last_start:
+        snippet = s[last_start:last_end + 1]
+        try:
+            return json.loads(snippet)
+        except Exception:
+            pass
+
+    # Fallback: varredura por balanceamento de chaves
+    stack = 0
+    start_idx = None
+    last_obj = None
+    for i, ch in enumerate(s):
+        if ch == "{":
+            if stack == 0:
+                start_idx = i
+            stack += 1
+        elif ch == "}":
+            if stack > 0:
+                stack -= 1
+                if stack == 0 and start_idx is not None:
+                    blob = s[start_idx:i + 1]
+                    try:
+                        last_obj = json.loads(blob)
+                    except Exception:
+                        pass
+                    start_idx = None
+
+    if last_obj is not None:
+        return last_obj
+
+    raise RuntimeError("Não encontrei JSON válido no stdout.")
+
+
+def run_and_capture(cmd_list: List[str], timeout: int = 600) -> Dict[str, Any]:
+    p = subprocess.run(cmd_list, capture_output=True, text=True, timeout=timeout)
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"Comando falhou (rc={p.returncode}).\n"
+            f"STDOUT:\n{p.stdout}\n\nSTDERR:\n{p.stderr}"
+        )
+    return extract_last_json(p.stdout)
+
+
+# ------------------ extração de métricas (formato novo do S2) ------------------
+
+def _get_rtt(summary: Dict[str, Any], receptor: str) -> Dict[str, Any]:
+    """
+    Retorna dict com rtt_{p50,p95,p99,n}.
+    No S2 atual, isso fica em metrics.rtt_B e metrics.rtt_C.
+    """
+    metrics = summary.get("metrics", {}) or {}
+    rtt = metrics.get(f"rtt_{receptor}", {}) or {}
+    return {
+        "rtt_p50_ms": rtt.get("p50"),
+        "rtt_p95_ms": rtt.get("p95"),
+        "rtt_p99_ms": rtt.get("p99"),
+        "rtt_n": rtt.get("n"),
+    }
+
+
+def extract_rows(summary_json: Dict[str, Any],
+                 bwA: float,
+                 bwB: float,
+                 bwC: float,
+                 delay_ms: float,
+                 be_mbps: float,
+                 backend_mode: str,
+                 mode: str) -> List[Dict[str, Any]]:
+    """
+    Gera 2 linhas (receptor B e receptor C) no formato "tidy".
+    Compatível com o summary atual do multicast_s2.py.
+    """
+    metrics = summary_json.get("metrics", {}) or {}
+    env = (summary_json.get("environment", {}) or {})
+
+    # Valores "do ambiente" reportados pelo próprio summary (melhor que confiar nos args)
+    bwA_eff = env.get("bwA_mbps", bwA)
+    bwB_eff = env.get("bwB_mbps", bwB)
+    bwC_eff = env.get("bwC_mbps", bwC)
+    delay_eff = env.get("delay_ms", delay_ms)
+
+    base = {
+        "timestamp_utc": summary_json.get("timestamp_utc"),
+        "scenario": summary_json.get("scenario"),
+        "flow_id": summary_json.get("flow_id"),
+        "spec_path": summary_json.get("spec_path"),
+        "backend_mode": backend_mode,
+        "mode": mode,
+        "bwA_mbps": bwA_eff,
+        "bwB_mbps": bwB_eff,
+        "bwC_mbps": bwC_eff,
+        "delay_ms": delay_eff,
+        "be_mbps": be_mbps,
+        "backend_apply_A": (summary_json.get("backend_apply", {}) or {}).get("A"),
+        "backend_apply_B": (summary_json.get("backend_apply", {}) or {}).get("B"),
+        "backend_apply_C": (summary_json.get("backend_apply", {}) or {}).get("C"),
+    }
+
+    rows = []
+    for r in ("B", "C"):
+        row = dict(base)
+        row["receptor"] = r
+        row["throughput_mbps"] = metrics.get(f"throughput_{r}_mbps")
+        row["delivery_ratio"] = metrics.get(f"delivery_ratio_{r}")
+        row.update(_get_rtt(summary_json, r))
+        rows.append(row)
+
+    return rows
+
+
+# ------------------ main ------------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+
+    ap.add_argument("--spec", required=True)
+    ap.add_argument("--duration", type=int, default=30)
+
+    # Ambiente do testbed
+    ap.add_argument("--bwA", type=float, default=100.0)
+    ap.add_argument("--bwB", type=float, nargs="+", default=[100.0, 50.0, 25.0, 10.0])
+    ap.add_argument("--bwC", type=float, default=100.0)
+    ap.add_argument("--delay-ms", type=float, default=1.0)
+
+    # Carga gerada
+    ap.add_argument("--be", type=float, nargs="+", default=[10.0, 30.0, 60.0, 90.0])
+
+    # Matriz experimental
+    ap.add_argument("--backends", nargs="+", choices=["mock", "real"], default=["mock", "real"])
+    ap.add_argument("--modes", nargs="+", choices=["baseline", "adapt"], default=["baseline", "adapt"])
+
+    # Execução
+    ap.add_argument("--python", default="python3",
+                    help="Interpretador Python a usar (ex.: /home/dev/net-dev/venv/bin/python)")
+    ap.add_argument("--sudo", action="store_true",
+                    help="Prefixa os comandos do cenário com sudo")
+    ap.add_argument("--timeout", type=int, default=0,
+                    help="Timeout por rodada (0 = auto: max(600, duration+120))")
+
+    # Saídas
+    ap.add_argument("--out", default="", help="Nome do CSV de saída (senão gera SWEEP_S2_<TS>.csv)")
+    ap.add_argument("--dump-jsonl", action="store_true",
+                    help="Também salva o JSON completo de cada execução em JSONL (1 por linha)")
+
+    # Higienização (opt-in)
+    ap.add_argument("--cleanup", action="store_true",
+                    help="Executa cleanup agressivo antes/depois de cada rodada (use com cautela)")
+
+    args = ap.parse_args()
+
+    ts = utc_ts()
+
+    out_dir = Path("results/compare")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = out_dir / (args.out if args.out else f"SWEEP_S2_{ts}.csv")
+    out_jsonl = out_dir / f"SWEEP_S2_{ts}_runs.jsonl"
+
+    rows: List[Dict[str, Any]] = []
+
+    # Comando base do cenário
+    base_cmd = [
+        args.python, "-m", MOD,
+        "--spec", args.spec,
+        "--duration", str(args.duration),
+        "--bwA", str(args.bwA),
+        "--bwC", str(args.bwC),
+        "--delay-ms", str(args.delay_ms),
+    ]
+    if args.sudo:
+        base_cmd = ["sudo"] + base_cmd
+
+    # limpeza inicial (se ativada)
+    cleanup(args.cleanup)
+
+    # timeout por rodada
+    per_run_timeout = args.timeout if args.timeout > 0 else max(600, args.duration + 120)
+
+    # JSONL (opcional)
+    jsonl_fp = None
+    if args.dump_jsonl:
+        jsonl_fp = out_jsonl.open("w", encoding="utf-8")
+
+    try:
+        for backend_mode in args.backends:
+            for bwB in args.bwB:
+                for be_val in args.be:
+                    for mode in args.modes:
+                        # cleanup pré-rodada (opcional)
+                        cleanup(args.cleanup)
+
+                        cmd = base_cmd + [
+                            "--bwB", str(bwB),
+                            "--be-mbps", str(be_val),
+                            "--mode", mode,
+                            "--backend", backend_mode,
+                        ]
+
+                        print("[CMD]", " ".join(shlex.quote(x) for x in cmd))
+
+                        try:
+                            j = run_and_capture(cmd, timeout=per_run_timeout)
+
+                            # (opcional) persiste JSON bruto por rodada para auditoria científica
+                            if jsonl_fp is not None:
+                                jsonl_fp.write(json.dumps(j, ensure_ascii=False) + "\n")
+                                jsonl_fp.flush()
+
+                            rows.extend(
+                                extract_rows(
+                                    j,
+                                    bwA=args.bwA, bwB=bwB, bwC=args.bwC,
+                                    delay_ms=args.delay_ms, be_mbps=be_val,
+                                    backend_mode=backend_mode, mode=mode
+                                )
+                            )
+                        except Exception as e:
+                            print(f"[warn] Falha em backend={backend_mode}, bwB={bwB}, be={be_val}, mode={mode}: {e}")
+                        finally:
+                            # cleanup pós-rodada (opcional)
+                            cleanup(args.cleanup)
+
+    finally:
+        if jsonl_fp is not None:
+            jsonl_fp.close()
+
+    # grava CSV (tidy)
+    hdr = [
+        "timestamp_utc", "scenario", "flow_id", "spec_path",
+        "backend_mode", "mode",
+        "bwA_mbps", "bwB_mbps", "bwC_mbps", "delay_ms", "be_mbps",
+        "backend_apply_A", "backend_apply_B", "backend_apply_C",
+        "receptor",
+        "throughput_mbps", "delivery_ratio",
+        "rtt_p50_ms", "rtt_p95_ms", "rtt_p99_ms", "rtt_n",
+    ]
+
+    with out_csv.open("w", encoding="utf-8") as f:
+        f.write(",".join(hdr) + "\n")
+        for r in rows:
+            f.write(",".join(str(r.get(k, "")) for k in hdr) + "\n")
+
+    print(f"[ok] CSV salvo em: {out_csv}")
+    if args.dump_jsonl:
+        print(f"[ok] JSONL (execuções) salvo em: {out_jsonl}")
+
+
+if __name__ == "__main__":
+    main()

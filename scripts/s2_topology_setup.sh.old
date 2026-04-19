@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -e
+
+echo "[S2-setup] Limpando restos antigos..."
+
+# Remove namespaces (se existirem)
+ip netns del h1 2>/dev/null || true
+ip netns del h2 2>/dev/null || true
+ip netns del h3 2>/dev/null || true
+
+# Remove links/bridge antigos (se existirem)
+ip link del veth-h1 2>/dev/null || true
+ip link del veth-h2 2>/dev/null || true
+ip link del veth-h3 2>/dev/null || true
+ip link del brs2 2>/dev/null || true
+
+echo "[S2-setup] Criando namespaces h1, h2, h3..."
+ip netns add h1
+ip netns add h2
+ip netns add h3
+
+echo "[S2-setup] Criando bridge brs2..."
+ip link add brs2 type bridge
+ip link set brs2 up
+
+############################################################
+# h1
+############################################################
+echo "[S2-setup] Criando par veth para h1..."
+ip link add veth-h1 type veth peer name veth-br-h1
+ip link set veth-h1 netns h1
+
+ip link set veth-br-h1 master brs2
+ip link set veth-br-h1 up
+
+ip netns exec h1 ip link set lo up
+# >>> RENOME CRÍTICO: veth-h1 -> h1-eth0 <<<
+ip netns exec h1 ip link set veth-h1 name h1-eth0
+ip netns exec h1 ip link set h1-eth0 up
+ip netns exec h1 ip addr add 10.0.0.1/24 dev h1-eth0
+
+############################################################
+# h2
+############################################################
+echo "[S2-setup] Criando par veth para h2..."
+ip link add veth-h2 type veth peer name veth-br-h2
+ip link set veth-h2 netns h2
+
+ip link set veth-br-h2 master brs2
+ip link set veth-br-h2 up
+
+ip netns exec h2 ip link set lo up
+ip netns exec h2 ip link set veth-h2 name h2-eth0
+ip netns exec h2 ip link set h2-eth0 up
+ip netns exec h2 ip addr add 10.0.0.2/24 dev h2-eth0
+
+############################################################
+# h3
+############################################################
+echo "[S2-setup] Criando par veth para h3..."
+ip link add veth-h3 type veth peer name veth-br-h3
+ip link set veth-h3 netns h3
+
+ip link set veth-br-h3 master brs2
+ip link set veth-br-h3 up
+
+ip netns exec h3 ip link set lo up
+ip netns exec h3 ip link set veth-h3 name h3-eth0
+ip netns exec h3 ip link set h3-eth0 up
+ip netns exec h3 ip addr add 10.0.0.3/24 dev h3-eth0
+
+echo "[S2-setup] Topologia S2 criada."
+echo "[S2-setup] Verifique com: ip -n h1 a ; ip -n h2 a ; ip -n h3 a"

@@ -1,0 +1,11 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "insert.ufba",
+  "scope": "teste01",
+  "flow": { "id": "VideoHD_A" },
+  "requirements": {
+    "latency": { "max_ms": 30, "percentile": "P99" },
+    "bandwidth": { "min_mbps": 55, "max_mbps": 88 },
+    "priority": { "level": "low" }
+  }
+}

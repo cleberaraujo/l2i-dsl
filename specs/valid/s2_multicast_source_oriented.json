@@ -1,0 +1,24 @@
+{
+  "flow_id": "S2_SourceOrientedMulticast",
+  "endpoints": {
+    "source": {"domain": "A", "host": "h1"},
+    "receivers": [
+      {"domain": "B", "host": "h3"},
+      {"domain": "C", "host": "h4"}
+    ]
+  },
+  "multicast": {
+    "enabled": true,
+    "group": "G1",
+    "tree": "SPT"
+  },
+  "bandwidth": {
+    "min_mbps": 2,
+    "max_mbps": 5
+  },
+  "priority": "medium",
+  "latency": {
+    "max_ms": 40,
+    "percentile": "P99"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "insert.ufba",
+  "scope": "seg-A",
+  "flow": { "id": "A" },
+  "requirements": {
+    "bandwidth": { "min_mbps": 20, "max_mbps": 10 }
+  }
+}

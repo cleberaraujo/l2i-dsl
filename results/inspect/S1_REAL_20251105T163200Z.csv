@@ -1,0 +1,2 @@
+timestamp,backend_mode,A.backend,A.applied,B.backend,B.applied,B.connected,B.caps_count,C.backend,C.applied,C.connected,C.pipeline_loaded,thr,rtt50,rtt95,rtt99,samples
+20251105T163200Z,unknown,linux_tc_local,True,None,True,False,0,None,True,False,None,None,None,None,None,None

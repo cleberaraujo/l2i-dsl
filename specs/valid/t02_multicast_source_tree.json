@@ -1,0 +1,11 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "org.example",
+  "scope": "lab-seg",
+  "flow": { "id": "Stream_M1" },
+  "requirements": {
+    "bandwidth": { "min_mbps": 2 },
+    "priority": { "level": "medium" },
+    "multicast": { "enabled": true, "group_id": "G1" }
+  }
+}

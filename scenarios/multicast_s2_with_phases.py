@@ -1,0 +1,884 @@
+# -*- coding: utf-8 -*-
+"""
+S2: Multicast "source-oriented" multi-domínios.
+
+Princípio científico (importante):
+- --spec descreve a INTENÇÃO (o que camadas superiores pedem).
+- --bwA/--bwB/--bwC/--delay-ms descrevem o AMBIENTE experimental (o que o testbed oferece),
+  tipicamente configurado pelo administrador/operador.
+- Logo: bw*/delay NÃO sobrescrevem o spec. Eles configuram o ambiente e são registrados no sumário.
+
+Para comparação científica baseline vs adapt:
+- baseline e adapt devem rodar no MESMO ambiente (mesmos --bw*/--delay-ms/--be-mbps).
+- A diferença entre baseline e adapt deve ser:
+  (i) alterações adicionais (overlay) motivadas pela intenção, e/ou
+  (ii) custo de controle (tempo de aplicação, número de comandos, etc).
+
+Artefatos:
+- preflight (ping), iperf3, RTT CSV
+- dom_{A,B,C}.json (com evidências, tempos e erros)
+- tc_dump_A (read-back do estado)
+- netconf_dump_B (read-back do running config)
+- p4_dump_C (read-back da tabela)
+- summary S2_{TS}.json com caminhos e métricas
+
+Domínios:
+- A: Linux tc/htb (local)
+- B: NETCONF (ncclient)
+- C: P4Runtime (gRPC)
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime
+import inspect
+import json
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Union, Optional
+
+
+# ---------------- util ----------------
+
+def utc_ts() -> str:
+    # timezone-aware (evita DeprecationWarning)
+    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def utc_iso(dt: datetime.datetime) -> str:
+    """UTC timestamp in RFC3339 `...Z` form."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return dt.astimezone(datetime.UTC).isoformat().replace("+00:00", "Z")
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RES_DIR = ROOT / "results" / "S2"
+RES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------- timing / phases ----------------
+
+class PhaseTracker:
+    """Collect wall-clock timing for experiment phases (and optional metrics per phase).
+
+    All times are relative to the experiment start (t0), in milliseconds.
+    """
+    def __init__(self) -> None:
+        self._t0_ns = time.time_ns()
+        self._open: dict[str, dict[str, Any]] = {}
+        self.phases: list[dict[str, Any]] = []
+
+    def _now_ms(self) -> int:
+        return int((time.time_ns() - self._t0_ns) / 1_000_000)
+
+    def start(self, name: str, **meta: Any) -> None:
+        if name in self._open:
+            # allow re-entrancy by auto-closing previous open
+            self.end(name)
+        self._open[name] = {"name": name, "start_ms": self._now_ms(), **meta}
+
+    def end(self, name: str, **fields: Any) -> None:
+        rec = self._open.pop(name, None)
+        if not rec:
+            return
+        rec["end_ms"] = self._now_ms()
+        rec["duration_ms"] = int(rec["end_ms"] - rec["start_ms"])
+        rec.update(fields)
+        self.phases.append(rec)
+
+    def mark(self, name: str, fn, **meta: Any):
+        """Run fn() while measuring time; return fn() result."""
+        self.start(name, **meta)
+        try:
+            return fn()
+        finally:
+            self.end(name)
+
+def _parse_phase_splits(s: str, total_ms: int) -> list[int]:
+    """Parse '--phase-splits' into increasing millisecond offsets.
+
+    Accepted forms:
+      - "10000,15000" (milliseconds)
+      - "10s,15s" (seconds)
+      - "10000ms,15000ms"
+    Values outside (0,total_ms) are ignored; output is sorted/unique.
+    """
+    if not s:
+        return []
+    out: list[int] = []
+    for tok in [t.strip() for t in s.split(",") if t.strip()]:
+        try:
+            if tok.endswith("ms"):
+                v = int(float(tok[:-2]))
+            elif tok.endswith("s"):
+                v = int(float(tok[:-1]) * 1000.0)
+            else:
+                v = int(float(tok))
+            if 0 < v < total_ms:
+                out.append(v)
+        except Exception:
+            continue
+    return sorted(set(out))
+
+
+
+def run(cmd: List[str],
+        check: bool = True,
+        capture: bool = False,
+        ns: str | None = None) -> str | None:
+    """
+    Executa comando (opcionalmente dentro de um namespace).
+    - capture=True retorna stdout (texto).
+    - check=True levanta exceção se rc != 0.
+    """
+    if ns:
+        cmd = ["ip", "netns", "exec", ns, *cmd]
+    p = subprocess.run(cmd, text=True, capture_output=True)
+    if check and p.returncode != 0:
+        raise RuntimeError(
+            f"cmd failed: {' '.join(cmd)}\nRC={p.returncode}\nSTDOUT:\n{p.stdout}\nSTDERR:\n{p.stderr}"
+        )
+    return p.stdout if capture else None
+
+
+def safe_dump_json(path: Path, obj: Any) -> None:
+    """
+    Escreve JSON robustamente (nunca deixa arquivo vazio).
+    """
+    try:
+        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2))
+    except Exception as e:
+        path.write_text(json.dumps({"error": f"dump_failed: {e}"}, ensure_ascii=False, indent=2))
+
+
+def load_json_or_fail(path: Path) -> Dict[str, Any]:
+    """
+    Consistência obrigatória:
+    - se o spec não existir -> falha
+    - se não for JSON válido -> falha
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"--spec file not found: {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ValueError(f"Invalid JSON in spec: {path} ({e})") from e
+
+
+def _mask_secret(d: Dict[str, Any], keys: Tuple[str, ...] = ("password", "pass", "secret")) -> Dict[str, Any]:
+    out = dict(d)
+    for k in keys:
+        if k in out and out[k] is not None:
+            out[k] = "***"
+    return out
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+# ----------- métricas & coleta -----------
+
+def collect_rtt_csv(ns: str, dst_ip: str, samples: int, out_csv: Path) -> Tuple[int, int]:
+    """
+    Coleta RTT via ping e grava CSV "seq,rtt_ms".
+    Retorna (n_ok, n_req) para delivery_ratio.
+    """
+    awk = r"""awk '/time=/{idx++; sub(/time=/, "", $7); printf("%d,%.3f\n", idx, $7)}'"""
+    cmd = f"ping -n -i 0.05 -c {samples} {dst_ip} | {awk}"
+    out = run(["bash", "-lc", cmd], check=True, capture=True, ns=ns) or ""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    out_csv.write_text("\n".join(["seq,rtt_ms", *lines]))
+    return (len(lines), samples)
+
+
+def rtt_stats(csv_path: Path) -> Dict[str, float]:
+    vals: List[float] = []
+    with csv_path.open() as f:
+        rd = csv.DictReader(f)
+        for r in rd:
+            try:
+                vals.append(float(r["rtt_ms"]))
+            except Exception:
+                pass
+    if not vals:
+        return dict(p50=0.0, p95=0.0, p99=0.0, n=0)
+
+    vals.sort()
+
+    def pct(p: float) -> float:
+        k = (len(vals) - 1) * p
+        i = int(k)
+        d = k - i
+        if i + 1 < len(vals):
+            return vals[i] * (1 - d) + vals[i + 1] * d
+        return vals[i]
+
+    return dict(
+        p50=round(pct(0.50), 1),
+        p95=round(pct(0.95), 1),
+        p99=round(pct(0.99), 1),
+        n=len(vals),
+    )
+
+
+def run_iperf3_unicast(duration: int,
+                       be_mbps: float,
+                       out_json: Path,
+                       ns_cli: str,
+                       ns_srv: str,
+                       srv_ip: str,
+                       port: int = 5201) -> None:
+    """
+    Executa iperf3 TCP (cliente no ns_cli -> servidor no ns_srv) e grava JSON do CLIENTE.
+
+    Problema observado anteriormente:
+    - "Connection refused" (server não estava pronto), o que gera throughput null.
+    Solução:
+    - iniciar server bindado no IP do namespace e aguardar até o socket estar LISTEN.
+    """
+    srv_cmd = ["ip", "netns", "exec", ns_srv, "iperf3", "-s", "-1", "-B", srv_ip, "-p", str(port)]
+    srv = subprocess.Popen(srv_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    ready = False
+    for _ in range(30):
+        time.sleep(0.05)
+        try:
+            out = run(["ss", "-lntp"], ns=ns_srv, check=False, capture=True) or ""
+            if f":{port}" in out and "iperf3" in out:
+                ready = True
+                break
+        except Exception:
+            pass
+
+    if not ready:
+        try:
+            serr = srv.stderr.read() if srv.stderr else ""
+        except Exception:
+            serr = ""
+        safe_dump_json(out_json, {
+            "error": "iperf3 server not ready",
+            "server_cmd": " ".join(srv_cmd),
+            "server_stderr": serr,
+        })
+        try:
+            srv.kill()
+        except Exception:
+            pass
+        return
+
+    cli = subprocess.run(
+        ["ip", "netns", "exec", ns_cli, "iperf3",
+         "-c", srv_ip, "-p", str(port),
+         "-t", str(duration), "-b", f"{be_mbps}M", "--json"],
+        text=True,
+        capture_output=True,
+    )
+
+    if cli.returncode == 0 and cli.stdout.strip().startswith("{"):
+        out_json.write_text(cli.stdout)
+    else:
+        safe_dump_json(out_json, {"error": "iperf3 client failed", "stdout": cli.stdout, "stderr": cli.stderr})
+
+    try:
+        srv.wait(timeout=2)
+    except Exception:
+        try:
+            srv.kill()
+        except Exception:
+            pass
+
+
+def parse_iperf3_mbps(path: Path) -> float | None:
+    """
+    Extrai Mbps do JSON do iperf3 (client).
+    Se falhar, retorna None (o que vira null no sumário).
+    """
+    try:
+        j = json.loads(path.read_text())
+    except Exception:
+        return None
+
+    if isinstance(j, dict) and "error" in j and "end" not in j:
+        return None
+
+    if isinstance(j, dict) and j.get("error"):
+        return None
+
+    try:
+        bps = j["end"]["sum_received"]["bits_per_second"]
+        return round(float(bps) / 1e6, 3) if bps else None
+    except Exception:
+        return None
+
+
+# ------------- TC (Domínio A) -------------
+
+def tc_apply_h1(min_mbps: float,
+                max_mbps: float,
+                ns: str,
+                dev: str,
+                prio_cls: str,
+                delay_ms: float,
+                be_port: int,
+                overlay: bool,
+                dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Domínio A (Linux tc/htb) com separação científica:
+
+    - "ambiente" (sempre): limita a capacidade do link no testbed e aplica delay controlado.
+      Isso garante que baseline e adapt rodem no MESMO ambiente.
+
+    - "overlay" (somente em adapt): adiciona classificação (filter) e classe específica
+      para evidenciar impacto/custo da adaptação (mudanças adicionais + tempo de controle).
+
+    Parâmetros:
+    - min_mbps/max_mbps: aqui representam o envelope do AMBIENTE (cap do domínio A).
+      (é proposital: não vem do spec; vem do operador via --bwA).
+    - delay_ms: também do ambiente (--delay-ms)
+    - overlay=True: aplica classe/filtro adicional (relacionada ao tráfego do experimento)
+    - be_port: porta do iperf3 (para filtro TCP dport)
+
+    Retorno:
+    - commands: comandos executados (ordem preservada)
+    - readback: dumps de qdisc/class/filter
+    - timing_ms: tempo de controle (ms) gasto no domínio A
+    - overlay_applied: bool
+    """
+    t0 = _now_ms()
+    cmds: List[List[str]] = []
+
+    def _r(c: List[str], check: bool = True):
+        cmds.append(c)
+        if not dry_run:
+            run(c, check=check, ns=ns)
+
+    # Reset
+    _r(["tc", "qdisc", "del", "dev", dev, "root"], check=False)
+
+    # Root HTB
+    _r(["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb", "default", "30"])
+
+    # Classe raiz (cap do link no testbed)
+    bw = int(max_mbps)
+    _r(["tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb",
+        "rate", f"{bw}mbit", "ceil", f"{bw}mbit"])
+
+    # "classe default" (para tráfego que não será classificado no overlay)
+    _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", "1:30", "htb",
+        "rate", f"{bw}mbit", "ceil", f"{bw}mbit"])
+
+    # Aplica netem como condição AMBIENTAL (igual em baseline e adapt)
+    # Observação: attach em 1:30 (default) para não exigir overlay.
+    _r(["tc", "qdisc", "add", "dev", dev, "parent", "1:30", "handle", "30:", "netem",
+        "delay", f"{delay_ms}ms"], check=False)
+
+    overlay_applied = False
+
+    if overlay:
+        # Classe "prioritária" (aqui usamos o MESMO envelope do ambiente, mas numa classe separada)
+        # Isso permite observar:
+        # - mais comandos
+        # - alteração de estado no readback
+        # - custo de controle (timing_ms)
+        _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", f"1:{prio_cls}", "htb",
+            "rate", f"{int(min_mbps)}mbit", "ceil", f"{int(max_mbps)}mbit"])
+
+        # netem também na classe priorizada (mesma condição ambiental, para isolar custo de controle)
+        _r(["tc", "qdisc", "add", "dev", dev, "parent", f"1:{prio_cls}", "handle", f"{prio_cls}:", "netem",
+            "delay", f"{delay_ms}ms"], check=False)
+
+        # Filtro: classifica o TCP dport do iperf (5201) na classe priorizada.
+        # Isso faz o overlay "ter efeito" sem inventar tráfego extra.
+        _r(["tc", "filter", "add", "dev", dev, "protocol", "ip", "parent", "1:", "prio", "1",
+            "u32", "match", "ip", "protocol", "6", "0xff",
+            "match", "ip", "dport", str(be_port), "0xffff",
+            "flowid", f"1:{prio_cls}"])
+
+        overlay_applied = True
+
+    if dry_run:
+        qdisc, classes, filters = "", "", ""
+    else:
+        qdisc = run(["tc", "qdisc", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
+        classes = run(["tc", "class", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
+        filters = run(["tc", "filter", "show", "dev", dev, "parent", "1:"], check=False, capture=True, ns=ns) or ""
+
+    t1 = _now_ms()
+    return {
+        "commands": [" ".join(c) for c in cmds],
+        "readback": {"qdisc": qdisc.strip(), "class": classes.strip(), "filter": filters.strip()},
+        "timing_ms": t1 - t0,
+        "overlay_applied": overlay_applied,
+    }
+
+
+# ------------- backends dinâmicos (A/B/C) -------------
+
+from l2i.backends.router import get_backends  # noqa: E402
+
+
+def _call_apply_qos(mod: Any,
+                    domain_ctx: Dict[str, Any],
+                    intent: Dict[str, Any],
+                    target: Optional[Dict[str, Any]]) -> Any:
+    """
+    Compatibilidade de assinaturas para apply_qos().
+    """
+    fn = getattr(mod, "apply_qos")
+    sig = inspect.signature(fn)
+    nparams = len(sig.parameters)
+
+    if nparams >= 3:
+        try:
+            return fn(domain_ctx, intent, target)
+        except TypeError:
+            return fn(domain_ctx.get("name", "X"), intent, target)
+
+    return fn(domain_ctx, intent)
+
+
+def _normalize_backend_result(raw: Any) -> Tuple[bool, Any]:
+    """
+    Normaliza o retorno do backend para o formato:
+      (applied_bool, info_any)
+    """
+    if isinstance(raw, (list, tuple)) and len(raw) == 2 and isinstance(raw[0], bool):
+        return raw[0], raw[1]
+
+    if isinstance(raw, dict) and isinstance(raw.get("applied"), bool):
+        return raw["applied"], raw
+
+    return True, raw
+
+
+def _apply_backend_chain(mod_or_list: Union[Any, List[Any]],
+                         domain_ctx: Dict[str, Any],
+                         intent: Dict[str, Any],
+                         target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Aplica uma cadeia de backends e interpreta applied corretamente.
+    Também mede custo de controle (ms) por backend.
+    """
+    mods = mod_or_list if isinstance(mod_or_list, (list, tuple)) else [mod_or_list]
+    responses = []
+    all_applied = True
+
+    for m in mods:
+        bname = getattr(m, "__name__", str(m))
+        t0 = _now_ms()
+        try:
+            raw = _call_apply_qos(m, domain_ctx=domain_ctx, intent=intent, target=target)
+            applied, info = _normalize_backend_result(raw)
+            if not applied:
+                all_applied = False
+            responses.append({
+                "backend": bname,
+                "applied": applied,
+                "duration_ms": _now_ms() - t0,
+                "response": info,
+            })
+        except Exception as e:
+            all_applied = False
+            responses.append({
+                "backend": bname,
+                "applied": False,
+                "duration_ms": _now_ms() - t0,
+                "error": str(e),
+            })
+
+    total_ms = sum(r.get("duration_ms", 0) for r in responses)
+    return {"applied": all_applied, "responses": responses, "timing_ms": total_ms}
+
+
+def _load_real_targets_yaml() -> Dict[str, Any]:
+    """
+    targets reais em: dsl/l2i/backends/backends_real.yaml
+    separa ambiente (credenciais, endereços) da intenção (spec).
+    """
+    import yaml
+    ypath = ROOT / "l2i" / "backends" / "backends_real.yaml"
+    if not ypath.exists():
+        raise FileNotFoundError(f"Missing real-backends config: {ypath}")
+    return yaml.safe_load(ypath.read_text(encoding="utf-8")) or {}
+
+
+# ------------- cenário S2 -------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", required=True)
+    ap.add_argument("--duration", type=int, default=30)
+    ap.add_argument("--be-mbps", type=float, default=30.0)
+    ap.add_argument("--mode", choices=["baseline", "adapt"], default="baseline")
+    ap.add_argument("--backend", choices=["mock", "real"], default="mock")
+    ap.add_argument("--phase-splits", default="", help="comma-separated phase boundaries (ms, or with 's'/'ms'), e.g. 10000,15000")
+    ap.add_argument("--event-name", default="event", help="label for the event phase (only when phase-splits defines an event window)")
+
+
+    # Parâmetros do AMBIENTE (defaults como antes)
+    ap.add_argument("--bwA", type=float, default=100.0, help="(env) bandwidth domain A (mbps)")
+    ap.add_argument("--bwB", type=float, default=100.0, help="(env) bandwidth domain B (mbps)")
+    ap.add_argument("--bwC", type=float, default=100.0, help="(env) bandwidth domain C (mbps)")
+    ap.add_argument("--delay-ms", type=float, default=1.0, help="(env) delay placeholder (ms)")
+
+    args = ap.parse_args()
+
+    # --- timing ---
+    tracker = PhaseTracker()
+    total_ms = int(args.duration * 1000)
+    phase_splits = _parse_phase_splits(args.phase_splits, total_ms)
+
+
+    # --- carrega spec (consistência obrigatória) ---
+    spec_path = Path(args.spec)
+    spec = load_json_or_fail(spec_path)
+
+    # --- intenção vinda do spec (não é sobrescrita pelo ambiente) ---
+    bw = spec.get("bandwidth", {})
+    intent_min_mbps = float(bw.get("min_mbps", 0))
+    intent_max_mbps = float(bw.get("max_mbps", 0))
+
+    prio = str(spec.get("priority", "medium")).lower().strip()
+    prio_cls = {"low": "30", "medium": "20", "high": "10"}.get(prio, "20")
+    prio_class_name = {"low": "prio30", "medium": "prio20", "high": "prio10"}.get(prio, "prio20")
+
+    intent = {"class": prio_class_name, "min_mbps": intent_min_mbps, "max_mbps": intent_max_mbps}
+
+    # --- endpoints ---
+    src_host = spec.get("endpoints", {}).get("source", {}).get("host", "h1")
+    recv_list = spec.get("endpoints", {}).get("receivers", [])
+
+    # Mapeamento do testbed (ajuste se necessário)
+    # Observação: no seu ambiente atual o receiver C está em h4 (10.0.0.4).
+    host_ip = {"h1": "10.0.0.1", "h2": "10.0.0.2", "h3": "10.0.0.3", "h4": "10.0.0.4", "h5": "10.0.0.4"}
+
+    recv_B = next((r for r in recv_list if r.get("domain") == "B"), None)
+    recv_C = next((r for r in recv_list if r.get("domain") == "C"), None)
+
+    ns_src = str(src_host)
+    ns_B = str(recv_B.get("host", "h3") if recv_B else "h3")
+    ns_C = str(recv_C.get("host", "h4") if recv_C else "h4")
+
+    ip_B = host_ip.get(ns_B, "10.0.0.3")
+    ip_C = host_ip.get(ns_C, "10.0.0.4")
+
+    # --- backends e targets ---
+    B_mods = None
+    C_mods = None
+    if args.mode == "adapt":
+        backends = get_backends(args.backend)
+        B_mods = backends["B"]
+        C_mods = backends["C"]
+
+    real_cfg = {}
+    if args.backend == "real":
+        real_cfg = _load_real_targets_yaml()
+
+    target_B = (real_cfg.get("B", {}) or {}).get("target") if args.backend == "real" else None
+    target_C = (real_cfg.get("C", {}) or {}).get("target") if args.backend == "real" else None
+
+    if isinstance(target_C, dict) and "dst_ip" not in target_C:
+        target_C = dict(target_C)
+        target_C["dst_ip"] = ip_C
+
+    # --- artefatos ---
+    ts = utc_ts()
+    t_wall_start = datetime.datetime.now(datetime.UTC)
+
+    pre_B = RES_DIR / f"S2_{ts}_preflight_B.txt"
+    pre_C = RES_DIR / f"S2_{ts}_preflight_C.txt"
+
+    ipf_B = RES_DIR / f"S2_{ts}_iperf_B.json"
+    ipf_C = RES_DIR / f"S2_{ts}_iperf_C.json"
+
+    rtt_B = RES_DIR / f"S2_{ts}_rtt_B.csv"
+    rtt_C = RES_DIR / f"S2_{ts}_rtt_C.csv"
+
+    domA = RES_DIR / f"S2_{ts}_dom_A.json"
+    domB = RES_DIR / f"S2_{ts}_dom_B.json"
+    domC = RES_DIR / f"S2_{ts}_dom_C.json"
+
+    tc_dump_A = RES_DIR / f"S2_{ts}_tc_dump_A.txt"
+    netconf_dump_B = RES_DIR / f"S2_{ts}_netconf_dump_B.txt"
+    p4_dump_C = RES_DIR / f"S2_{ts}_p4_dump_C.txt"
+
+    summary = RES_DIR / f"S2_{ts}.json"
+
+    s2 = {
+        "scenario": "S2_multicast_source_oriented",
+        "flow_id": spec.get("flow_id", "S2"),
+        "timestamp_utc": ts,
+        "t_wall_start": utc_iso(t_wall_start),
+        "mode": args.mode,
+        "backend_mode": args.backend,
+        "spec_path": str(spec_path),
+        "spec_exists": True,
+
+        "environment": {
+            "bwA_mbps": args.bwA,
+            "bwB_mbps": args.bwB,
+            "bwC_mbps": args.bwC,
+            "delay_ms": args.delay_ms,
+            "be_mbps": args.be_mbps,
+        },
+
+        "intent": intent,
+
+        "endpoints": {"source": ns_src, "B": {"ns": ns_B, "ip": ip_B}, "C": {"ns": ns_C, "ip": ip_C}},
+        "targets": {
+            "B": _mask_secret(target_B or {}) if target_B else None,
+            "C": _mask_secret(target_C or {}) if target_C else None,
+        },
+        "backend_apply": {"A_env": False, "A_overlay": False, "B": False, "C": False},
+        "control_plane_ms": {"A": 0, "B": 0, "C": 0, "total": 0},
+        "artifacts": {
+            "domA_json": str(domA),
+            "domB_json": str(domB),
+            "domC_json": str(domC),
+            "preflight_B": str(pre_B),
+            "preflight_C": str(pre_C),
+            "iperf_B_json": str(ipf_B),
+            "iperf_C_json": str(ipf_C),
+            "rtt_B_csv": str(rtt_B),
+            "rtt_C_csv": str(rtt_C),
+            "tc_dump_A_txt": str(tc_dump_A),
+            "netconf_dump_B_txt": str(netconf_dump_B),
+            "p4_dump_C_txt": str(p4_dump_C),
+            "summary_json": str(summary),
+        },
+    }
+
+    tracker.start("preflight")
+
+    # --- preflight ---
+    try:
+        out = run(["ping", "-n", "-c", "3", ip_B], ns=ns_src, check=False, capture=True) or ""
+        pre_B.write_text(out)
+    except Exception as e:
+        pre_B.write_text(f"[preflight_error] {e}")
+
+    try:
+        out = run(["ping", "-n", "-c", "3", ip_C], ns=ns_src, check=False, capture=True) or ""
+        pre_C.write_text(out)
+    except Exception as e:
+        pre_C.write_text(f"[preflight_error] {e}")
+
+    # ---------------------------
+    # Domínio A: sempre aplica AMBIENTE (baseline e adapt) + overlay apenas no adapt
+    # ---------------------------
+    domA_info = {
+        "backend": "linux_tc_local",
+        "mode": args.mode,
+        "env_params": {"bwA_mbps": args.bwA, "delay_ms": args.delay_ms},
+        "intent_seen": intent,
+        "overlay_policy": {"prio_cls": prio_cls, "be_port": 5201},
+        "applied_env": False,
+        "applied_overlay": False,
+        "timing_ms": 0,
+        "commands": [],
+        "readback": {},
+    }
+
+    if args.mode == "adapt":
+        # Nota: o "ambiente" usa bwA; não vem do spec.
+        # Em mock, simulamos (não aplicamos), mas registramos o plano de comandos.
+        dry_run = (args.backend != "real")
+        evA = tc_apply_h1(
+            min_mbps=args.bwA,
+            max_mbps=args.bwA,
+            ns=ns_src,
+            dev=f"{ns_src}-eth0",
+            prio_cls=prio_cls,
+            delay_ms=args.delay_ms,
+            be_port=5201,
+            overlay=True,
+            dry_run=dry_run,
+        )
+        domA_info["applied_env"] = not dry_run
+        domA_info["applied_overlay"] = (not dry_run) and bool(evA.get("overlay_applied", False))
+        domA_info["timing_ms"] = int(evA.get("timing_ms", 0))
+        domA_info["commands"] = evA.get("commands", [])
+        domA_info["readback"] = evA.get("readback", {})
+        domA_info["simulated"] = bool(dry_run)
+
+        # SUBSTIUI ESTE TRECHO COMENTADO PELAS LINHAS 638 a 652
+        #tc_dump_A.write_text(
+        #    "### tc qdisc\n" + (domA_info["readback"].get("qdisc") or "") +
+        #    "\n\n### tc class\n" + (domA_info["readback"].get("class") or "") +
+        #    "\n\n### tc filter\n" + (domA_info["readback"].get("filter") or "") + "\n"
+        #)
+    if args.backend == "mock":
+        # No mock não há readback; então registramos o plano (comandos simulados)
+        tc_dump_A.write_text(
+            "### simulated tc/htb plan (not applied)\n"
+            + "\n".join(domA_info.get("commands", [])) + "\n"
+        )
+    else:
+        # No real, mantemos o readback (estado do sistema) e também os comandos aplicados
+        tc_dump_A.write_text(
+            "### tc/htb commands (applied)\n"
+            + "\n".join(domA_info.get("commands", [])) +
+            "\n\n### tc qdisc\n" + (domA_info["readback"].get("qdisc") or "") +
+            "\n\n### tc class\n" + (domA_info["readback"].get("class") or "") +
+            "\n\n### tc filter\n" + (domA_info["readback"].get("filter") or "") + "\n"
+    )
+    #else:
+    #    # Baseline: não executa adaptações; backend é irrelevante.
+    #    domA_info["simulated"] = False
+    #    tc_dump_A.write_text("[baseline] no tc changes applied\n")
+
+    safe_dump_json(domA, domA_info)
+    s2["backend_apply"]["A_env"] = bool(domA_info.get("applied_env", False))
+    s2["backend_apply"]["A_overlay"] = bool(domA_info.get("applied_overlay", False))
+    s2["control_plane_ms"]["A"] = int(domA_info.get("timing_ms", 0))
+
+    # ---------------------------
+    # Domínio B: só aplica em adapt (o ambiente B é do testbed físico/lógico, não do spec)
+    # ---------------------------
+    domB_info = {
+        "backend_chain": [getattr(m, "__name__", str(m)) for m in (B_mods if isinstance(B_mods, (list, tuple)) else [B_mods])],
+        "applied": False,
+        "t_wall_start": None,
+        "t_wall_end": None,
+        "duration_ms": None,
+        "t_wall_start": None,
+        "t_wall_end": None,
+        "duration_ms": None,
+        "env_params": {"bwB_mbps": args.bwB},
+        "target": _mask_secret(target_B or {}) if target_B else None,
+        "timing_ms": 0,
+        "responses": [],
+    }
+
+    if args.mode == "adapt":
+        domB_info["t_wall_start"] = time.time()
+        tracker.start("apply_B", domain="B")
+        aggB = _apply_backend_chain(B_mods, domain_ctx={"name": "B"}, intent=intent, target=target_B)
+        tracker.end("apply_B")
+        domB_info["t_wall_end"] = time.time()
+        domB_info["duration_ms"] = int((domB_info["t_wall_end"] - domB_info["t_wall_start"]) * 1000) if domB_info["t_wall_start"] else None
+        domB_info["timing_ms"] = tracker.phases[-1]["duration_ms"] if tracker.phases else 0
+        domB_info.update(aggB)
+
+        dumped = False
+        for r in domB_info.get("responses", []):
+            info = r.get("response")
+            if isinstance(info, dict) and info.get("running_snapshot"):
+                netconf_dump_B.write_text(str(info.get("running_snapshot")))
+                dumped = True
+                break
+        if not dumped:
+            netconf_dump_B.write_text("[no_dump] backend returned empty running_snapshot\n")
+    else:
+        netconf_dump_B.write_text("[baseline] no netconf changes applied\n")
+
+    safe_dump_json(domB, domB_info)
+    s2["backend_apply"]["B"] = bool(domB_info.get("applied", False))
+    s2["control_plane_ms"]["B"] = int(domB_info.get("timing_ms", 0))
+
+    # ---------------------------
+    # Domínio C: só aplica em adapt
+    # ---------------------------
+    domC_info = {
+        "backend_chain": [getattr(m, "__name__", str(m)) for m in (C_mods if isinstance(C_mods, (list, tuple)) else [C_mods])],
+        "applied": False,
+        "t_wall_start": None,
+        "t_wall_end": None,
+        "duration_ms": None,
+        "env_params": {"bwC_mbps": args.bwC},
+        "target": _mask_secret(target_C or {}) if target_C else None,
+        "timing_ms": 0,
+        "readback_dump": None,
+        "responses": [],
+    }
+
+    if args.mode == "adapt":
+        domC_info["t_wall_start"] = time.time()
+        tracker.start("apply_C", domain="C")
+        aggC = _apply_backend_chain(C_mods, domain_ctx={"name": "C"}, intent=intent, target=target_C)
+        tracker.end("apply_C")
+        domC_info["t_wall_end"] = time.time()
+        domC_info["duration_ms"] = int((domC_info["t_wall_end"] - domC_info["t_wall_start"]) * 1000) if domC_info["t_wall_start"] else None
+        domC_info["timing_ms"] = tracker.phases[-1]["duration_ms"] if tracker.phases else 0
+        domC_info.update(aggC)
+
+        dump_txt = None
+        for r in domC_info.get("responses", []):
+            info = r.get("response")
+            if isinstance(info, dict) and info.get("readback_dump"):
+                dump_txt = info.get("readback_dump")
+                break
+
+        if dump_txt:
+            domC_info["readback_dump"] = "[embedded]"
+            p4_dump_C.write_text(str(dump_txt))
+        else:
+            domC_info["readback_dump"] = "[no_dump]"
+            p4_dump_C.write_text("[no_dump] backend returned empty readback_dump\n")
+    else:
+        p4_dump_C.write_text("[baseline] no p4 changes applied\n")
+
+    safe_dump_json(domC, domC_info)
+    s2["backend_apply"]["C"] = bool(domC_info.get("applied", False))
+    s2["control_plane_ms"]["C"] = int(domC_info.get("timing_ms", 0))
+
+    s2["control_plane_ms"]["total"] = int(s2["control_plane_ms"]["A"] + s2["control_plane_ms"]["B"] + s2["control_plane_ms"]["C"])
+
+    tracker.start("traffic")
+
+    # --- tráfego e métricas ---
+    run_iperf3_unicast(args.duration, args.be_mbps, ipf_B, ns_cli=ns_src, ns_srv=ns_B, srv_ip=ip_B)
+    run_iperf3_unicast(args.duration, args.be_mbps, ipf_C, ns_cli=ns_src, ns_srv=ns_C, srv_ip=ip_C)
+
+    tracker.end("traffic")
+
+    tracker.start("rtt_collection")
+    okB, reqB = collect_rtt_csv(ns=ns_src, dst_ip=ip_B, samples=80, out_csv=rtt_B)
+    okC, reqC = collect_rtt_csv(ns=ns_src, dst_ip=ip_C, samples=80, out_csv=rtt_C)
+    tracker.end("rtt_collection")
+
+    s2["metrics"] = {
+        "throughput_B_mbps": parse_iperf3_mbps(ipf_B),
+        "throughput_C_mbps": parse_iperf3_mbps(ipf_C),
+        "delivery_ratio_B": round(okB / reqB, 3) if reqB else 0.0,
+        "delivery_ratio_C": round(okC / reqC, 3) if reqC else 0.0,
+        "rtt_B": rtt_stats(rtt_B),
+        "rtt_C": rtt_stats(rtt_C),
+    }
+
+    # Wall-clock do experimento (padronizado com S1)
+    t_wall_end = datetime.datetime.now(datetime.UTC)
+    s2["t_wall_end"] = utc_iso(t_wall_end)
+    s2["duration_ms"] = int((t_wall_end - t_wall_start).total_seconds() * 1000)
+
+    
+    # --- phases (optional user-defined windows) ---
+    if phase_splits:
+        # Interpret splits as [0,s1],[s1,s2],[s2,total] ... and label a middle phase as 'event' when there are exactly 3 phases.
+        bounds = [0, *phase_splits, total_ms]
+        phase_list: list[dict[str, Any]] = []
+        for i in range(len(bounds) - 1):
+            phase_list.append({
+                "name": ("pre_event" if len(bounds)==4 and i==0 else (args.event_name if len(bounds)==4 and i==1 else ("post_event" if len(bounds)==4 and i==2 else f"phase_{i}"))),
+                "start_ms": int(bounds[i]),
+                "end_ms": int(bounds[i+1]),
+            })
+        s2["phase_plan"] = {"total_ms": total_ms, "splits_ms": phase_splits, "event_name": args.event_name, "phases": phase_list}
+
+    # Measured phases of the experiment pipeline
+    s2["phases_measured"] = tracker.phases
+
+    safe_dump_json(summary, s2)
+
+
+    # Feedback no terminal (operabilidade)
+    print(json.dumps(s2, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

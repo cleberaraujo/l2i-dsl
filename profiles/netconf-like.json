@@ -1,0 +1,32 @@
+{
+  "profile_id": "netconf-like",
+  "queues": {
+    "max_queues": 4,
+    "modes": {
+      "strict": true,
+      "wfq": { "supported": true, "weights_min": 1, "weights_max": 16 }
+    }
+  },
+  "meters": {
+    "supported": true,
+    "types": ["tbf"],
+    "min_rate_mbps": 1,
+    "max_rate_mbps": 10000
+  },
+  "multicast": {
+    "mode": "vlan_flood",
+    "max_groups": 128,
+    "max_replications_per_group": 64
+  },
+  "ports": [
+    { "name": "edge-B", "speed_mbps": 1000 },
+    { "name": "core-B", "speed_mbps": 1000 }
+  ],
+  "atomic_commit": false,
+  "telemetry": {
+    "rtt_percentile": true,
+    "throughput_sustained": true,
+    "queue_occupancy": true,
+    "delivery_ratio": false
+  }
+}

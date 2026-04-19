@@ -1,0 +1,11 @@
+{
+  "l2i_version": "0.1",
+  "tenant": "insert.ufba",
+  "scope": "seg-C",
+  "flow": { "id": "StreamX" },
+  "requirements": {
+    "priority": { "level": "medium" },
+    "multicast": { "enabled": true, "group_id": "GX" }
+  },
+  "target_profile": "legacy-no-mc"
+}

@@ -1,0 +1,21 @@
+{
+  "profile_id": "domA-universal",
+  "description": "Domain A - permissive profile for tests (HTB/wfq supported)",
+  "queues": {
+    "max_queues": 8,
+    "modes": {
+      "strict": true,
+      "wfq": { "supported": true, "weights_min": 1, "weights_max": 64 }
+    }
+  },
+  "meters": {
+    "supported": true,
+    "types": ["tbf"],
+    "min_rate_mbps": 1,
+    "max_rate_mbps": 1000
+  },
+  "multicast": { "mode": "l2mc_static", "max_groups": 512, "max_replications_per_group": 32 },
+  "ports": [ { "name": "edge", "speed_mbps": 1000 } ],
+  "atomic_commit": false,
+  "telemetry": { "rtt_percentile": true, "throughput_sustained": true, "queue_occupancy": true, "delivery_ratio": false }
+}
