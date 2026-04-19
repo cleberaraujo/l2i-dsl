@@ -38,6 +38,44 @@ O artefato é projetado para ser:
 
 ---
 
+## 🏅 Selos considerados
+
+Este artefato foi estruturado para solicitar os seguintes selos do CTA:
+
+- 🟢 **SeloD** — Artefato Disponível
+- 🟢 **SeloF** — Artefato Funcional
+- 🟢 **SeloS** — Artefato Sustentável
+- 🎯 **SeloR** — Experimentos Reprodutíveis (**objetivo principal**)
+
+---
+
+## 📖 Estrutura deste README
+
+Este README foi organizado conforme os requisitos mínimos do CTA e funciona como ponto de entrada para o artefato. Ele apresenta:
+
+1. Título e resumo do artigo
+2. Objetivo do repositório
+3. Selos considerados
+4. Ideia central
+5. Domínios experimentais
+6. Cenários experimentais
+7. Execução rápida
+8. Estrutura do repositório
+9. Organização do ambiente local
+10. Instalação
+11. Teste mínimo
+12. Experimentos
+13. Reivindicações
+14. Execução após reinicialização
+15. Máquina virtual
+16. Preocupações com Segurança
+17. Licença
+
+
+As demais informações detalhadas foram distribuídas em páginas específicas para manter a navegação mais leve.
+
+---
+
 ## 🧠 Ideia central
 
 > Intenções de comunicação são declaradas de forma abstrata e materializadas dinamicamente na camada de enlace.
