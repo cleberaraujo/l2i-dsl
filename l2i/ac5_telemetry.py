@@ -11,10 +11,10 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/ac5_telemetry.py
 # Geração de telemetria mínima (RTT percentílica e throughput) + avaliação de SLO
+"""
 
 from __future__ import annotations
 import subprocess, shlex, time, json, statistics, re, signal

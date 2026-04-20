@@ -1,190 +1,139 @@
 # 📊 Experimentos
 
-🏠 [README](../README.md) · ⚙️ [Instalação](installation.md) · 🧪 [Teste mínimo](minimal_test.md) · 🧠 [Reivindicações](claims.md)
+🏠 [README](../README.md) · ⚙️ [Instalação](installation.md) · 🧪 [Teste mínimo](minimal_test.md) · 🧠 [Reivindicações](claims.md) · 🔁 [Pós-reboot](runtime_after_reboot.md)
 
 ---
 
 ## 🎯 Objetivo
 
-Este documento descreve como executar e interpretar os experimentos associados ao artefato, com foco em:
+Este documento descreve como executar, controlar e interpretar os experimentos do artefato, incluindo:
 
-* validação do pipeline declarativo L2i
-* comportamento em ambiente heterogêneo real
-* comparação entre modos de execução
-* observação de propriedades emergentes
-
----
-
-# 🧠 Modelo experimental
-
-Os experimentos são estruturados em duas dimensões independentes:
-
-## 🔀 Modo de operação
-
-### `baseline`
-
-* execução sem adaptação declarativa
-* representa comportamento tradicional
-
-### `adapt`
-
-* ativa o pipeline L2i
-* realiza tradução e materialização dinâmica
+* execução automatizada e manual
+* controle fino de parâmetros
+* análise de métricas
+* validação das propriedades experimentais
 
 ---
 
-## ⚙️ Tipo de backend
+# 🧠 1. Modelo experimental
 
-### `mock`
+A avaliação é estruturada em dois eixos ortogonais:
 
-* valida apenas o pipeline lógico
-* não aplica configurações reais
+## 🎛️ Controle
 
-### `real`
+* **baseline**: comportamento tradicional
+* **adapt**: adaptação via L2i
 
-* aplica configurações efetivas em:
+## 🧪 Backend
 
-  * Linux (`tc`)
-  * NETCONF/YANG
-  * P4
-
----
-
-## 🧩 Combinação dos eixos
-
-| Modo     | Backend | Interpretação     |
-| -------- | ------- | ----------------- |
-| baseline | mock    | referência lógica |
-| baseline | real    | rede tradicional  |
-| adapt    | mock    | validação da DSL  |
-| adapt    | real    | execução completa |
+* **mock**: execução lógica
+* **real**: aplicação em `tc`, NETCONF e P4
 
 ---
 
-# 📂 Especificações declarativas
+## 📊 Combinação
 
-As intenções são descritas em:
-
-```bash id="6y8u2j"
-specs/valid/
-```
-
-Principais arquivos:
-
-* `s1_unicast_qos.json`
-* `s2_multicast_source_oriented.json`
+| Modo            | Controle   | Backend |
+| --------------- | ---------- | ------- |
+| baseline + mock | estático   | lógico  |
+| baseline + real | estático   | real    |
+| adapt + mock    | adaptativo | lógico  |
+| adapt + real    | adaptativo | real    |
 
 ---
 
-## 🔍 Exemplo
+# 🧪 2. Testbed
 
-```json id="tq3o4v"
-{
-  "flow_id": "flow1",
-  "bandwidth": 10,
-  "priority": "high"
-}
-```
+Os experimentos utilizam:
 
-Essas especificações são:
-
-* validadas via JSON Schema
-* interpretadas pela DSL L2i
-* traduzidas para múltiplos domínios
+* network namespaces
+* enlaces `veth`
+* controle via `tc`
+* medições com `iperf3` e `ping`
 
 ---
 
-# 🧪 Cenário S1 — Unicast multidomínio com QoS
+# 📐 3. Cenários
 
-## 🎯 Objetivo
+## 🔀 S1 — Unicast QoS
 
-Avaliar:
+Avalia:
 
-* controle de largura de banda
-* isolamento entre fluxos
-* previsibilidade sob contenção
+* isolamento de fluxos
+* garantia de banda
+* comportamento sob contenção
 
 ---
 
-## ▶️ Execução padrão
+## 🌳 S2 — Multicast orientado à origem
 
-```bash id="x5z6hf"
+Avalia:
+
+* eventos dinâmicos (`join`)
+* adaptação temporal
+* estabilidade pós-recuperação
+
+---
+
+# ▶️ 4. Execução automatizada
+
+```bash id="t_auto01"
 ./setup_all.sh run_s1_real
+./setup_all.sh run_s2_real
 ```
 
 ---
 
-## ▶️ Execução manual (controle fino)
+# 🧪 5. Execução manual (controle total)
 
-```bash id="8xgkdn"
+## Ordem obrigatória
+
+```text id="t_order01"
+NETCONF → P4 → pipeline → topologia → experimento
+```
+
+---
+
+## Subir ambiente
+
+```bash id="t_manual01"
+sudo /usr/local/sbin/netopeer2-server -d
+source ~/l2i-dev/venv/bin/activate
+cd ~/l2i-dsl
+./scripts/p4_build_and_run.sh
+python scripts/p4_push_pipeline.py --addr 127.0.0.1:9559
+sudo ./scripts/s1_topology_setup.sh
+```
+
+---
+
+## Execução S1
+
+```bash id="t_manual02"
 sudo ~/l2i-dev/venv/bin/python -m scenarios.multidomain_s1 \
   --spec specs/valid/s1_unicast_qos.json \
-  --duration 10 \
-  --be-mbps 30 \
+  --duration 30 \
+  --bwA 100 --bwB 50 --bwC 100 \
+  --delay-ms 1 \
+  --be-mbps 60 \
   --mode adapt \
   --backend real
 ```
 
 ---
 
-## 📊 Artefatos gerados
+## Execução S2
 
-```bash id="jql6l1"
-results/
-```
-
-Arquivos típicos:
-
-* `S1_<timestamp>.json`
-* `S1_<timestamp>_domain_A.json`
-* `S1_<timestamp>_domain_B.json`
-* `S1_<timestamp>_domain_C.json`
-
----
-
-## 🔍 Métricas observáveis
-
-* throughput por fluxo
-* RTT (amostras)
-* consistência entre execuções
-* aplicação de backend (`backend_apply`)
-
----
-
-# 🌳 Cenário S2 — Multicast orientado à origem
-
-## 🎯 Objetivo
-
-Avaliar:
-
-* adaptação a eventos dinâmicos (`join`)
-* comportamento multicast em L2
-* recuperação e estabilidade temporal
-
----
-
-## ▶️ Execução padrão
-
-```bash id="4k8q3y"
-./setup_all.sh run_s2_real
-```
-
----
-
-## ▶️ Execução manual
-
-```bash id="d1y6vt"
+```bash id="t_manual03"
 sudo ~/l2i-dev/venv/bin/python -m scenarios.multicast_s2_recovery_stable5 \
   --spec specs/valid/s2_multicast_source_oriented.json \
-  --duration 10 \
+  --duration 30 \
   --be-mbps 80 \
-  --bwA 40 \
-  --bwB 100 \
-  --bwC 100 \
+  --bwA 40 --bwB 100 --bwC 100 \
   --delay-ms 1 \
   --mode adapt \
   --backend real \
-  --phase-splits 3 6 \
+  --phase-splits 10 15 \
   --event-name join \
   --rtt-interval-ms 50 \
   --recovery-bin-ms 500 \
@@ -193,82 +142,114 @@ sudo ~/l2i-dev/venv/bin/python -m scenarios.multicast_s2_recovery_stable5 \
 
 ---
 
-## 📊 Métricas observáveis
+# ⏱️ 6. Tempo esperado
 
-* throughput por domínio
-* RTT ao longo do tempo
-* resposta ao evento `join`
-* estabilidade após recuperação
+| Etapa               | Tempo típico |
+| ------------------- | ------------ |
+| start_real_services | ~5–10 s      |
+| S1                  | ~10–30 s     |
+| S2                  | ~20–40 s     |
 
 ---
 
-# 🔬 Comparações experimentais
+# 💻 7. Consumo de recursos
 
-## Mock vs Real
+| Recurso | Estimativa |
+| ------- | ---------- |
+| CPU     | 1–2 cores  |
+| RAM     | ~2–4 GB    |
+| Disco   | ~1–2 GB    |
 
-```bash id="jv8m02"
-./setup_all.sh run_s1_mock
-./setup_all.sh run_s1_real
+Observações:
+
+* build inicial (P4/NETCONF) requer mais recursos
+* execução dos cenários é leve
+
+---
+
+# 📊 8. Métricas avaliadas
+
+* latência (percentis, ex.: P99)
+* vazão
+* impacto de tráfego concorrente
+* conformidade semântica
+* tempo até estabilidade (S2)
+
+---
+
+# 📂 9. Resultados
+
+```bash id="t_results01"
+results/S1/
+results/S2/
 ```
 
-Permite separar:
+Cada execução gera:
 
-* validade lógica do modelo
-* materialização tecnológica
-
----
-
-## Baseline vs Adapt
-
-Execução manual:
-
-```bash id="9y4uaz"
---mode baseline
---mode adapt
-```
-
-Permite observar:
-
-* impacto da abordagem declarativa
-* diferenças de comportamento sob contenção
+* JSON (sumário)
+* CSV (séries temporais)
+* dumps de configuração
+* logs
 
 ---
 
-# 🧠 Interpretação geral
+# 📌 10. Resultado esperado
 
-Os experimentos permitem observar que:
-
-* a intenção declarativa é independente do backend
-* a materialização ocorre em múltiplos domínios
-* há separação clara entre semântica e mecanismo
-* o comportamento pode ser controlado via especificação
-
----
-
-# 🔁 Fluxo recomendado
-
-```text
-1. ./setup_all.sh start_real_services
-2. ./setup_all.sh run_s1_real
-3. ./setup_all.sh run_s2_real
-4. analisar results/
+```json id="t_expected01"
+"backend_apply": {
+  "A": true,
+  "B": true,
+  "C": true
+}
 ```
 
 ---
 
-# 📎 Relação com o artigo
+# 🧠 11. Interpretação
 
-Os experimentos aqui descritos correspondem diretamente às avaliações apresentadas no artigo.
+Esse resultado indica:
 
-🔗 https://github.com/cleberaraujo/link_layer_intent.git
+* aplicação consistente em múltiplos domínios
+* tradução correta da intenção
+* execução fim a fim do pipeline
 
 ---
 
-# 📌 Observações finais
+# 🔁 12. Reprodutibilidade
 
-* resultados podem variar levemente conforme hardware
-* o modo `real` é o principal para análise
-* o modo `mock` é útil para depuração e validação estrutural
+Recomenda-se:
+
+* executar cada cenário pelo menos 3 vezes
+* comparar variações de throughput e latência
+* analisar estabilidade temporal (S2)
+
+---
+
+# 🧪 13. Variações experimentais
+
+Exemplos:
+
+* aumentar `be-mbps` → maior contenção
+* reduzir `bwB` → gargalo em domínio intermediário
+* alterar `phase-splits` → impacto no tempo de recuperação
+
+---
+
+# 🧹 14. Limpeza
+
+```bash id="t_cleanup01"
+sudo ./scripts/s1_topology_cleanup.sh
+sudo ./scripts/cleanup_net.sh
+```
+
+---
+
+# ✔️ 15. Verificações
+
+```bash id="t_check01"
+ss -ltnp | grep 830
+ss -ltnp | grep 9559
+```
 
 ---
 

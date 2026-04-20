@@ -11,12 +11,12 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/emit.py
 # Emissores simplificados de artefatos por domínio (dry-run):
 #  - NETCONF-like (B)
 #  - P4Runtime-like (C)
+"""
 
 import json
 from typing import Dict, Any

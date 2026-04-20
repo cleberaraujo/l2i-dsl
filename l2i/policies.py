@@ -11,7 +11,6 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/policies.py
 # Políticas organizacionais v0 para L2i.
@@ -21,6 +20,7 @@ Licença: Apache License 2.0
 #    * priority in {high, medium, low}: permitido a todos
 #    * latency.max_ms: se < 5ms, eleva para 5ms (limite organizacional)
 #    * bandwidth: se min_mbps existir e max_mbps não, define max = 2 * min
+"""
 
 from typing import Tuple, Dict, Any
 

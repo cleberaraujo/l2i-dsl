@@ -11,13 +11,12 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-# -*- coding: utf-8 -*-
-"""
 Backend P4Runtime 'real' – Etapa 1 (stub seguro).
 Define a API, sem programar tabelas ainda.
 """
+
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import Any, Dict, Tuple
 from . import BackendResult

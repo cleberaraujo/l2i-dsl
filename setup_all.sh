@@ -109,6 +109,7 @@ P4_PORT="${P4_PORT:-9559}"
 P4_ADDR="${P4_ADDR:-127.0.0.1:${P4_PORT}}"
 
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
+BUILD_DIR_LIBYANG="${BUILD_DIR_LIBYANG:-$NET_SRC_DIR/build-libyang}"
 BUILD_DIR_SYSREPO="${BUILD_DIR_SYSREPO:-$NET_SRC_DIR/build-sysrepo}"
 BUILD_DIR_LIBNETCONF2="${BUILD_DIR_LIBNETCONF2:-$NET_SRC_DIR/build-libnetconf2}"
 BUILD_DIR_NETOPEER2="${BUILD_DIR_NETOPEER2:-$NET_SRC_DIR/build-Netopeer2}"
@@ -116,6 +117,7 @@ BUILD_DIR_PI="${BUILD_DIR_PI:-$NET_SRC_DIR/build-PI}"
 BUILD_DIR_BMV2="${BUILD_DIR_BMV2:-$NET_SRC_DIR/build-behavioral-model}"
 BUILD_DIR_P4C="${BUILD_DIR_P4C:-$NET_SRC_DIR/build-p4c}"
 
+LIBYANG_REPO="${LIBYANG_REPO:-https://github.com/CESNET/libyang.git}"
 SYSREPO_REPO="${SYSREPO_REPO:-https://github.com/sysrepo/sysrepo.git}"
 LIBNETCONF2_REPO="${LIBNETCONF2_REPO:-https://github.com/CESNET/libnetconf2.git}"
 NETOPEER2_REPO="${NETOPEER2_REPO:-https://github.com/CESNET/Netopeer2.git}"
@@ -128,12 +130,16 @@ PI_REF="${PI_REF:-5689c91a8a7423781267b27d8b166c49a53904ff}"
 BMV2_REF="${BMV2_REF:-e6f4501a63ccb040d21a6d0c4dc333c593c77677}"
 P4C_REF="${P4C_REF:-8c4420e21f38554e568c2028db9254e71cf9d87f}"
 
-# Sysrepo/libnetconf2/Netopeer2 podem ser pinados externamente, se desejado.
+# libyang/sysrepo/libnetconf2/Netopeer2 podem ser pinados externamente, se desejado.
+LIBYANG_REF="${LIBYANG_REF:-master}"
 SYSREPO_REF="${SYSREPO_REF:-master}"
 LIBNETCONF2_REF="${LIBNETCONF2_REF:-master}"
 NETOPEER2_REF="${NETOPEER2_REF:-master}"
 
 export DEBIAN_FRONTEND=noninteractive
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+export CMAKE_PREFIX_PATH="/usr/local:${CMAKE_PREFIX_PATH:-}"
+export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}"
 
 # -------------------------------
 # helpers de sistema
@@ -281,6 +287,28 @@ PY
 # -------------------------------
 # builds por código-fonte
 # -------------------------------
+build_libyang() {
+  local src="$NET_SRC_DIR/libyang"
+
+  if pkg-config --exists libyang; then
+    local have_ver
+    have_ver="$(pkg-config --modversion libyang 2>/dev/null || true)"
+    if [[ -n "$have_ver" ]]; then
+      info "libyang já encontrado via pkg-config (versão $have_ver)."
+      return 0
+    fi
+  fi
+
+  clone_or_update_git "$LIBYANG_REPO" "$src" "$LIBYANG_REF"
+  cmake_build_install "$src" "$BUILD_DIR_LIBYANG"     -DCMAKE_BUILD_TYPE=Release
+
+  pkg-config --exists libyang || {
+    err "libyang não ficou visível via pkg-config após a instalação."
+    err "Verifique PKG_CONFIG_PATH=/usr/local/lib/pkgconfig e os arquivos instalados em /usr/local."
+    exit 1
+  }
+}
+
 build_sysrepo() {
   local src="$NET_SRC_DIR/sysrepo"
   clone_or_update_git "$SYSREPO_REPO" "$src" "$SYSREPO_REF"
@@ -307,11 +335,12 @@ build_netopeer2() {
 }
 
 build_netconf() {
-  if command -v netopeer2-server >/dev/null 2>&1 && command -v sysrepoctl >/dev/null 2>&1; then
+  if command -v netopeer2-server >/dev/null 2>&1 && command -v sysrepoctl >/dev/null 2>&1 && pkg-config --exists libyang; then
     info "Stack NETCONF já presente — pulando build."
     return 0
   fi
 
+  build_libyang
   build_sysrepo
   build_libnetconf2
   build_netopeer2
@@ -402,28 +431,16 @@ write_nacm_file() {
 XML
 }
 
-configure_netconf_server_xml() {
-  local xml_file="/tmp/l2i-netconf-user.xml"
-  cat > "$xml_file" <<XML
+write_netconf_user_auth_file() {
+  local auth_file="$REPO_DIR/l2i-netconf-user-auth.xml"
+  cat > "$auth_file" <<XML
 <netconf-server xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-server">
   <listen>
     <endpoints>
       <endpoint>
-        <name>default-ssh</name>
+        <name>${NETCONF_ENDPOINT_NAME:-default-ssh}</name>
         <ssh>
-          <tcp-server-parameters>
-            <local-address>0.0.0.0</local-address>
-            <local-port>${NETCONF_PORT}</local-port>
-          </tcp-server-parameters>
           <ssh-server-parameters>
-            <server-identity>
-              <host-key>
-                <name>default-key</name>
-                <public-key>
-                  <keystore-reference xmlns="urn:ietf:params:xml:ns:yang:ietf-keystore">genkey</keystore-reference>
-                </public-key>
-              </host-key>
-            </server-identity>
             <client-authentication>
               <users>
                 <user>
@@ -441,7 +458,13 @@ configure_netconf_server_xml() {
   </listen>
 </netconf-server>
 XML
-  echo "$xml_file"
+}
+
+apply_netconf_user_auth() {
+  local auth_file="$REPO_DIR/l2i-netconf-user-auth.xml"
+  write_netconf_user_auth_file
+  run sudo sysrepocfg --edit="$auth_file" -d running -f xml -m ietf-netconf-server
+  run sudo sysrepocfg --edit="$auth_file" -d startup -f xml -m ietf-netconf-server
 }
 
 configure_netconf() {
@@ -449,8 +472,7 @@ configure_netconf() {
   assert_repo_files
 
   if ! id -u "$NETCONF_USER" >/dev/null 2>&1; then
-    run sudo useradd --system --shell /usr/sbin/nologin \
-      --home-dir "$NETCONF_HOME" --create-home "$NETCONF_USER"
+    run sudo useradd --system --shell /usr/sbin/nologin       --home-dir "$NETCONF_HOME" --create-home "$NETCONF_USER"
   else
     info "Usuário NETCONF já existe: $NETCONF_USER"
   fi
@@ -464,6 +486,9 @@ configure_netconf() {
   run sudo install -o "$NETCONF_USER" -g "$NETCONF_USER" -m 600 "$NETCONF_KEY.pub" "$NETCONF_HOME/.ssh/authorized_keys"
   run sudo chown -R "$NETCONF_USER:$NETCONF_USER" "$NETCONF_HOME"
 
+  info "Mantendo a configuração de listener SSH padrão do Netopeer2 para evitar incompatibilidades entre revisões do módulo ietf-netconf-server."
+  info "Aplicando explicitamente o cadastro do usuário NETCONF no endpoint padrão do servidor."
+
   if ! command -v sysrepoctl >/dev/null 2>&1; then
     err "sysrepoctl não encontrado. Execute build_netconf antes."
     exit 1
@@ -475,11 +500,10 @@ configure_netconf() {
     info "Módulo YANG l2i-qos já instalado."
   fi
 
-  local server_xml
-  server_xml="$(configure_netconf_server_xml)"
-  run sudo sysrepocfg --edit="$server_xml" -d running -f xml -m ietf-netconf-server
-  run sudo sysrepocfg --edit="$server_xml" -d startup -f xml -m ietf-netconf-server
+  apply_netconf_user_auth
 
+  # Mantemos a configuração de escuta do servidor NETCONF no padrão instalado pelo Netopeer2.
+  # Isso reduz fragilidade entre versões distintas do módulo ietf-netconf-server.
   write_nacm_file
   run sudo sysrepocfg --import="$REPO_DIR/l2i-nacm-netconf-permit.xml" -f xml -d running -m ietf-netconf-acm
   run sudo sysrepocfg --import="$REPO_DIR/l2i-nacm-netconf-permit.xml" -f xml -d startup -m ietf-netconf-acm
@@ -526,19 +550,57 @@ push_p4_pipeline() {
   run "$PYTHON_BIN" "$REPO_DIR/scripts/p4_push_pipeline.py" --addr "$P4_ADDR"
 }
 
+wait_for_port() {
+  local port="$1"
+  local timeout_s="${2:-15}"
+  local i
+  for ((i=1; i<=timeout_s; i++)); do
+    if port_listening "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+show_bmv2_diagnostics() {
+  local log_file="${1:-/tmp/l2i_minimal/bmv2.log}"
+  warn "Diagnóstico P4/BMv2:"
+  if pgrep -af simple_switch_grpc >/dev/null 2>&1; then
+    pgrep -af simple_switch_grpc || true
+  else
+    warn "Processo simple_switch_grpc não encontrado após tentativa de inicialização."
+  fi
+
+  if [[ -f "$log_file" ]]; then
+    warn "Últimas linhas de $log_file:"
+    tail -n 60 "$log_file" >&2 || true
+  else
+    warn "Arquivo de log do BMv2 não encontrado em $log_file."
+  fi
+}
+
 start_p4() {
   require_repo_layout
   assert_repo_files
 
+  local bmv2_log="${BMV2_LOG_FILE:-/tmp/l2i_minimal/bmv2.log}"
+
   if port_listening "$P4_PORT"; then
     info "P4 já está em execução na porta $P4_PORT."
-  else
-    run bash -lc "cd '$REPO_DIR' && ./scripts/p4_build_and_run.sh"
-    port_listening "$P4_PORT" || {
-      err "P4 não abriu a porta $P4_PORT."
-      exit 1
-    }
+    return 0
   fi
+
+  run bash -lc "cd '$REPO_DIR' && ./scripts/p4_build_and_run.sh"
+
+  if wait_for_port "$P4_PORT" "${P4_START_TIMEOUT:-20}"; then
+    info "P4 ativo na porta $P4_PORT."
+    return 0
+  fi
+
+  show_bmv2_diagnostics "$bmv2_log"
+  err "P4 não abriu a porta $P4_PORT dentro do tempo esperado."
+  exit 1
 }
 
 start_real_services() {
@@ -658,7 +720,7 @@ PY
 
 verify_services() {
   port_listening "$NETCONF_PORT" || { err "NETCONF fora de escuta."; exit 1; }
-  port_listening "$P4_PORT" || { err "P4 fora de escuta."; exit 1; }
+  wait_for_port "$P4_PORT" 2 || { err "P4 fora de escuta."; exit 1; }
   info "VERIFY_SERVICES_OK"
 }
 
@@ -727,8 +789,11 @@ Variáveis úteis:
   NETCONF_USER=netconf
   NETCONF_KEY=$HOME/.ssh/l2i_netconf_key
   NETCONF_PORT=830
+  NETCONF_ENDPOINT_NAME=default-ssh
   P4_PORT=9559
   P4_ADDR=127.0.0.1:9559
+  P4_START_TIMEOUT=20
+  BMV2_LOG_FILE=/tmp/l2i_minimal/bmv2.log
   DRY_RUN=1
 EOF
 }
@@ -738,6 +803,7 @@ case "${1:-}" in
   apt_base) apt_base ;;
   python_env) python_env ;;
   build_p4) build_p4 ;;
+  build_libyang) build_libyang ;;
   build_netconf) build_netconf ;;
   build_sysrepo) build_sysrepo ;;
   build_libnetconf2) build_libnetconf2 ;;

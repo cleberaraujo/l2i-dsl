@@ -11,10 +11,7 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-# -*- coding: utf-8 -*-
-"""
 _shim_real_p4.py (Domínio C / P4Runtime)
 
 Objetivo (científico e reprodutível):
@@ -34,6 +31,8 @@ Melhorias nesta versão:
 3) Faz verificação pós-write: se a regra esperada aparece no readback, marca applied=True e registra
    write_error_but_verified=True.
 """
+
+# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 

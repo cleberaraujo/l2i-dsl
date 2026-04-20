@@ -11,9 +11,7 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-"""
 Arquivo: l2i/mcast.py
 Descrição: (AC3/AC4 multicast) expande InstallSourceTree em ReplicationPlan por dispositivo (emissão NETCONF-like por switch)
 Autor: Cleber Araújo (antoniocleber@ifba.edu.br)

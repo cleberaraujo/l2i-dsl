@@ -11,11 +11,11 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/closed_loop.py
 # Laço fechado L2I v0: MAD (política de ajustes) + AC5 (telemetria) + AC (re-síntese)
 # Aplica passos cautelosos e monotônicos até satisfazer SLOs ou atingir limites.
+"""
 
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict

@@ -11,11 +11,11 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/models.py
 # Modelos canônicos usados no pipeline L2i.
 # Mantemos estruturas simples (TypedDict/alias) para casar com JSON direto.
+"""
 
 from typing import Any, Dict, List, Optional, TypedDict
 

@@ -11,10 +11,8 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-# SPDX-License-Identifier: Apache 2.0
-"""Apply plan instrumentation helpers.
+Apply plan instrumentation helpers.
 
 Goal: record *what* each backend intends to change (plan) and *how long* it took to apply,
 without coupling this logic to specific scenarios.

@@ -11,11 +11,11 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/legacy_exec.py
 # Executor "legacy" para aplicar QoS com tc/htb dentro do namespace do host Mininet.
 # Usa o 'run' injetado (ex.: run=lambda cmd: h1.cmd(cmd)) – NUNCA chama tc no namespace global.
+"""
 
 from typing import Callable, Dict, Any, List
 

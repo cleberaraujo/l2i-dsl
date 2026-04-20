@@ -11,10 +11,8 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-# -*- coding: utf-8 -*-
-"""Apply Plan (execution instrumentation)
+Apply Plan (execution instrumentation)
 
 This module provides a small, dependency-free recorder to capture:
 - start/end timestamps (monotonic + wall clock ISO8601) for each "apply" phase
@@ -26,6 +24,7 @@ Design goals:
 - stable JSON: can be embedded in run summaries and later post-processed.
 - no coupling to scenarios: scenarios call the recorder; the recorder does not import scenarios.
 """
+# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 

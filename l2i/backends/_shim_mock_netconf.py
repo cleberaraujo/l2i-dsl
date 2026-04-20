@@ -11,9 +11,7 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-"""
 Backend NETCONF mock — não abre sessão real; apenas simula um <edit-config>.
 Use para validar a L2i/pipeline. O router envelopa a resposta.
 """

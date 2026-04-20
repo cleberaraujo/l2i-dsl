@@ -11,12 +11,12 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/capabilities.py
 # Verificações de capacidade por domínio (MAD):
 #  - ensure_capability_valid(profile): valida estrutura/consistência do profile
 #  - check_capabilities(specP, profile): checa aderência da intenção às capacidades do profile
+"""
 
 from typing import Tuple, Dict, Any, List
 

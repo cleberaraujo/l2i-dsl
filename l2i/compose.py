@@ -11,9 +11,7 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-"""
 Arquivo: l2i/compose.py
 Descrição: (MAD) operador (meet) para compor múltiplas intenções do mesmo fluxo e detectar conflitos
 Autor: Cleber Araújo (antoniocleber@ifba.edu.br)

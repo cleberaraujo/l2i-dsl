@@ -11,13 +11,12 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-# -*- coding: utf-8 -*-
-"""
 Backend NETCONF 'real' – Etapa 1 (stub seguro).
 Apenas define a API compatível, sem efetivar edit-config ainda.
 """
+
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import Any, Dict
 from . import BackendResult

@@ -4,183 +4,126 @@
 
 ---
 
-## 📌 Título do artigo
+# 📌 Título do projeto
 
 **Uma Abordagem Declarativa e Modular para Adaptação Dinâmica da Camada de Enlace de Redes Heterogêneas**
 
 ---
 
-## 📝 Resumo
+# 📝 Resumo
 
-A camada de enlace das redes contemporâneas permanece fortemente acoplada a mecanismos específicos e a modelos de configuração pouco expressivos, limitando sua adaptação dinâmica e evolução incremental. Este trabalho propõe uma abordagem declarativa e modular para adaptação dinâmica em L2, baseada na separação entre especificação declarativa e materialização tecnológica.
+Este repositório contém o artefato experimental associado ao artigo acima, publicado na Trilha Principal do SBRC 2026, cujo objetivo é investigar como intenções de comunicação podem ser expressas de forma declarativa em L2 e materializadas dinamicamente em ambientes heterogêneos.
 
-A linguagem L2i permite que aplicações e protocolos expressem requisitos de comunicação de forma abstrata e independente de tecnologia. A proposta foi avaliada em um ambiente experimental construído com namespaces de rede Linux, enlaces virtuais e componentes reais de controle e plano de dados, envolvendo domínios Linux (`tc`), NETCONF/YANG e P4.
+A proposta introduz a linguagem **L2i (Layer-2 Intent)**, que permite declarar requisitos como largura de banda, latência, prioridade e multicast, desacoplando especificação semântica de mecanismos de implementação.
 
-Os resultados indicam maior previsibilidade, isolamento entre fluxos e estabilidade sob contenção, com overhead operacional limitado.
+A avaliação é realizada em um ambiente baseado em:
 
----
-
-## 🎯 Objetivo do repositório
-
-Este repositório contém o **artefato experimental completo** associado ao artigo, com foco em:
-
-* reprodução de cenários experimentais
-* validação do pipeline declarativo L2i
-* execução em infraestrutura heterogênea real
-* análise de comportamento sob diferentes modos de operação
-
-O artefato é projetado para ser:
-
-* executável localmente
-* reproduzível
-* modular
-* independente de ferramentas externas complexas
+* namespaces de rede Linux
+* controle de tráfego (`tc`)
+* NETCONF/YANG (`sysrepo`, `Netopeer2`)
+* P4 (`bmv2`, `P4Runtime`)
 
 ---
 
-## 🏅 Selos considerados
+# 📂 Estrutura deste README
 
-Este artefato foi estruturado para solicitar os seguintes selos do CTA:
+Este documento está organizado conforme boas práticas de avaliação de artefatos:
 
-- 🟢 **SeloD** — Artefato Disponível
-- 🟢 **SeloF** — Artefato Funcional
-- 🟢 **SeloS** — Artefato Sustentável
-- 🎯 **SeloR** — Experimentos Reprodutíveis (**objetivo principal**)
+1. Informações básicas
+2. Dependências
+3. Segurança
+4. Instalação
+5. Teste mínimo
+6. Experimentos
+7. Licença
 
----
-
-## 📖 Estrutura deste README
-
-Este README foi organizado conforme os requisitos mínimos do CTA e funciona como ponto de entrada para o artefato. Ele apresenta:
-
-1. Título e resumo do artigo
-2. Objetivo do repositório
-3. Selos considerados
-4. Ideia central
-5. Domínios experimentais
-6. Cenários experimentais
-7. Execução rápida
-8. Estrutura do repositório
-9. Organização do ambiente local
-10. Instalação
-11. Teste mínimo
-12. Experimentos
-13. Reivindicações
-14. Execução após reinicialização
-15. Máquina virtual
-16. Preocupações com Segurança
-17. Licença
-
-
-As demais informações detalhadas foram distribuídas em páginas específicas para manter a navegação mais leve.
+Detalhes adicionais estão distribuídos nos arquivos em `docs/`.
 
 ---
 
-## 🧠 Ideia central
+# ℹ️ Informações básicas
 
-> Intenções de comunicação são declaradas de forma abstrata e materializadas dinamicamente na camada de enlace.
+O artefato implementa:
 
-A arquitetura é estruturada em três blocos:
+* uma DSL declarativa para L2 (L2i)
+* um pipeline de adaptação multidomínio
+* execução sobre três domínios heterogêneos:
 
-* **CED** — Camada de Especificações Declarativas
-* **MAD** — Mecanismo de Adaptação Dinâmica
-* **AC** — Aplicador de Configurações
-
-📖 Detalhes: [docs/architecture.md](docs/architecture.md)
-
----
-
-## 🧩 Domínios experimentais
-
-O sistema opera sobre três domínios distintos:
-
-* **A** — Linux (`tc` / HTB)
-* **B** — NETCONF/YANG (`sysrepo`, `Netopeer2`)
-* **C** — P4 (`bmv2`, `P4Runtime`)
+  * Linux (`tc`)
+  * NETCONF/YANG
+  * P4
 
 ---
 
-## 🧪 Cenários experimentais
+# 📦 Dependências
 
-### 🔀 S1 — Unicast multidomínio com QoS
+## Sistema
 
-Avalia controle de banda, prioridade e isolamento sob contenção.
+* Ubuntu 24.04 LTS
+* Python 3.12
+* `cmake`, `build-essential`, `pkg-config`
+* `iproute2`, `iperf3`, `fping`, `graphviz`
 
-### 🌳 S2 — Multicast orientado à origem
+## Stack P4
 
-Avalia adaptação dinâmica a eventos e comportamento multicast em L2.
+* PI
+* behavioral-model
+* p4c
 
-📖 Guia completo: [docs/experiments.md](docs/experiments.md)
+## Stack NETCONF
+
+* libyang
+* sysrepo
+* libnetconf2
+* Netopeer2
+
+## Python
+
+* jsonschema
+* grpcio
+* protobuf==3.20.3
+* ncclient
 
 ---
 
-## 🚀 Execução rápida
+# 🔐 Segurança
+
+O artefato:
+
+* cria usuário `netconf`
+* utiliza autenticação SSH por chave pública
+* aplica política NACM permissiva
+* cria namespaces de rede
+
+Recomenda-se execução em ambiente isolado (VM ou máquina dedicada).
+
+---
+
+# 🚀 Instalação
+
+## Automática
 
 ```bash
 chmod +x setup_all.sh
 ./setup_all.sh all
-./setup_all.sh start_real_services
-./setup_all.sh run_s1_real
 ```
 
 ---
 
-## 📂 Estrutura do repositório
-
-```text
-.
-├── README.md
-├── setup_all.sh
-├── docs/
-├── l2i/
-├── scenarios/
-├── scripts/
-├── specs/
-├── schemas/
-├── profiles/
-├── p4src/
-├── yang/
-├── results/
-├── figures/
-```
-
-📖 Detalhado: [docs/repository_structure.md](docs/repository_structure.md)
-
----
-
-## ⚙️ Organização do ambiente local
-
-O artefato assume a seguinte organização fora do repositório:
+## Organização do ambiente
 
 ```bash
-~/l2i-dsl        # repositório
-~/l2i-src        # código-fonte de dependências (P4, NETCONF)
-~/l2i-dev/venv   # ambiente Python
+~/l2i-dsl
+~/l2i-src
+~/l2i-dev/venv
 ```
-
-Esses caminhos são utilizados automaticamente pelo `setup_all.sh`.
 
 ---
 
-## 📦 Instalação
-
-### Automática
+# 🧪 Teste mínimo
 
 ```bash
-./setup_all.sh all
-```
-
-### Manual
-
-Processo detalhado em:
-
-👉 [docs/installation.md](docs/installation.md)
-
----
-
-## 🧪 Teste mínimo
-
-```bash
+source ~/l2i-dev/venv/bin/activate
 ./setup_all.sh start_real_services
 ./setup_all.sh run_s1_real
 ```
@@ -191,67 +134,163 @@ Validação:
 grep -R '"backend_apply"' results/ -n
 ```
 
-📖 Detalhes: [docs/minimal_test.md](docs/minimal_test.md)
+Resultado esperado:
+
+```json
+"backend_apply": {
+  "A": true,
+  "B": true,
+  "C": true
+}
+```
 
 ---
 
-## 📊 Experimentos
+# 📊 Experimentos
 
-Execução dos cenários:
+## 🔀 Execução automatizada
 
 ```bash
 ./setup_all.sh run_s1_real
 ./setup_all.sh run_s2_real
 ```
 
-📖 Guia completo: [docs/experiments.md](docs/experiments.md)
+---
+
+## 🧪 Execução manual (controle completo)
+
+### Ordem obrigatória
+
+```text
+NETCONF → P4 → pipeline → topologia → experimento
+```
 
 ---
 
-## 🧠 Reivindicações
+### 1. Subir NETCONF
 
-As propriedades experimentais observáveis estão descritas em:
-
-👉 [docs/claims.md](docs/claims.md)
+```bash
+sudo /usr/local/sbin/netopeer2-server -d
+```
 
 ---
 
-## 🔁 Execução após reinicialização
+### 2. Ambiente
+
+```bash
+source ~/l2i-dev/venv/bin/activate
+cd ~/l2i-dsl
+```
+
+---
+
+### 3. Subir P4
+
+```bash
+./scripts/p4_build_and_run.sh
+```
+
+---
+
+### 4. Carregar pipeline
+
+```bash
+python scripts/p4_push_pipeline.py --addr 127.0.0.1:9559
+```
+
+---
+
+### 5. Criar topologia
+
+```bash
+sudo ./scripts/s1_topology_setup.sh
+```
+
+---
+
+### 6. Executar S1
+
+```bash
+sudo ~/l2i-dev/venv/bin/python -m scenarios.multidomain_s1 \
+  --spec specs/valid/s1_unicast_qos.json \
+  --duration 30 \
+  --bwA 100 --bwB 50 --bwC 100 \
+  --delay-ms 1 \
+  --be-mbps 60 \
+  --mode adapt \
+  --backend real
+```
+
+---
+
+### 7. Executar S2
+
+```bash
+sudo ~/l2i-dev/venv/bin/python -m scenarios.multicast_s2_recovery_stable5 \
+  --spec specs/valid/s2_multicast_source_oriented.json \
+  --duration 30 \
+  --be-mbps 80 \
+  --bwA 40 --bwB 100 --bwC 100 \
+  --delay-ms 1 \
+  --mode adapt \
+  --backend real \
+  --phase-splits 10 15 \
+  --event-name join \
+  --rtt-interval-ms 50 \
+  --recovery-bin-ms 500 \
+  --stable-k-bins 3
+```
+
+---
+
+## 📊 Resultados
+
+```bash
+results/S1/
+results/S2/
+```
+
+Incluem:
+
+* JSON
+* CSV
+* dumps de configuração
+* logs
+
+---
+
+# 🧠 Reivindicações principais
+
+* inicialização multidomínio
+* execução fim a fim
+* materialização declarativa
+* suporte a multicast dinâmico
+
+📖 Detalhes em: [docs/claims.md](docs/claims.md)
+
+---
+
+# 🔁 Execução após reboot
 
 ```bash
 source ~/l2i-dev/venv/bin/activate
 ./setup_all.sh start_real_services
 ```
 
-📖 Guia: [docs/runtime_after_reboot.md](docs/runtime_after_reboot.md)
-
 ---
 
-## 🖥️ Máquina virtual
+# 🖥️ Máquina virtual
 
 Uma VM pré-configurada pode ser utilizada para evitar o processo de instalação completo.
 
-📖 Detalhes: [docs/vm.md](docs/vm.md)
+📖 Detalhes em: [docs/vm.md](docs/vm.md)
 
 ---
 
-## 🔐 Segurança
+# 👥 Autores
 
-Este artefato:
-
-* cria usuário `netconf`
-* configura autenticação SSH por chave
-* aplica política NACM permissiva
-* manipula namespaces de rede
-
-Recomenda-se execução em ambiente isolado (VM ou máquina dedicada).
-
----
-
-## 👥 Autores
-
-* Antônio Cleber de Sousa Araújo
-* Leobino N. Sampaio
+* Antônio Cleber de Sousa Araújo (antoniocleber@ifba.edu.br)
+* Leobino N. Sampaio (leobino@ufba.br)
 
 ---
 
@@ -261,14 +300,8 @@ Os autores agradecem o apoio do Conselho Nacional de Desenvolvimento Científico
 
 ---
 
-## 📜 Licença
+# 📜 Licença
 
 Apache License 2.0
-
----
-
-## 🔗 Repositório do artigo
-
-https://github.com/cleberaraujo/link_layer_intent.git
 
 ---

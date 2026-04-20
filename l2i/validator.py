@@ -11,11 +11,11 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/validator.py
 # CED/validador v0: validação leve e normalização da intenção.
 # Retorna (specC, errs), onde errs é uma lista de ErrorMsg (vazia => válido).
+"""
 
 from typing import Any, Dict, List, Tuple, Optional
 from .models import ErrorMsg  # CanonicalSpec é um alias de tipo; NÃO deve ser chamado

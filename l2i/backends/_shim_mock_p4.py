@@ -11,9 +11,7 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-"""
 Backend P4 mock — não conecta no P4Runtime; apenas simula table_mods.
 Útil para manter o pipeline funcionando enquanto o real é plugado.
 """

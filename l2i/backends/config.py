@@ -11,13 +11,12 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-# -*- coding: utf-8 -*-
-"""
 Config loader para backends 'reais'. Lê YAML opcional quando --backend real.
 Se o arquivo não existir, retorna defaults seguros.
 """
+
+# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 import os

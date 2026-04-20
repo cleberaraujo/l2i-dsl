@@ -11,11 +11,11 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/synth.py
 # Síntese do IR a partir de uma CanonicalSpec + perfil de capacidades.
 # Política e capacidade já foram tratadas; aqui só traduzimos requisitos em ações IR.
+"""
 
 from typing import Any, Dict
 import datetime

@@ -11,10 +11,10 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
 # l2i/fed.py
 # MAD federado v0 (com artefatos estritamente por domínio)
+"""
 
 from copy import deepcopy
 from typing import Dict, Tuple, Any, List

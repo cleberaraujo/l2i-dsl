@@ -11,20 +11,22 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-"""
 _shim_real_netconf.py
 
 Backend NETCONF "real" para o Domínio B.
 
-Correção crítica:
-- o YANG do l2i-qos usa uint32 em min-mbps/max-mbps (conforme erro do netopeer2).
-- portanto, valores vindos do intent (que podem chegar como 2.0) DEVEM ser serializados como inteiro.
+Correções aplicadas:
+- preserva o contrato original do backend (apply_qos -> Tuple[bool, Dict[str, Any]])
+- mantém serialização segura para uint32 do YANG l2i-qos
+- expande caminhos com "~" de forma segura
+- permite override por variável de ambiente NETCONF_KEY
+- valida explicitamente a existência da chave antes da conexão
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Tuple
 
 from ncclient import manager
@@ -49,12 +51,10 @@ def _fmt_uint32(v: Any) -> str | None:
     if v is None:
         return None
 
-    # tenta normalizar
     if isinstance(v, bool):
-        # bool é int em Python, mas não queremos aceitar
         raise ValueError("uint32 value must be numeric, not bool")
 
-    if isinstance(v, (int,)):
+    if isinstance(v, int):
         if v < 0:
             raise ValueError("uint32 must be >= 0")
         return str(v)
@@ -68,7 +68,6 @@ def _fmt_uint32(v: Any) -> str | None:
 
     if isinstance(v, str):
         s = v.strip()
-        # aceita "2" ou "2.0"
         if s.isdigit():
             return s
         try:
@@ -102,6 +101,24 @@ def _build_qos_xml(intent: Dict[str, Any]) -> str:
 """.strip()
 
 
+def _resolve_key_filename(target: Dict[str, Any]) -> str:
+    """
+    Resolve a chave privada do NETCONF com a seguinte precedência:
+    1. variável de ambiente NETCONF_KEY
+    2. key_filename/ssh_key/private_key vindos do target
+    3. ~/.ssh/l2i_netconf_key
+    """
+    env_key = os.environ.get("NETCONF_KEY")
+    candidate = (
+        env_key
+        or target.get("key_filename")
+        or target.get("ssh_key")
+        or target.get("private_key")
+        or "~/.ssh/l2i_netconf_key"
+    )
+    return os.path.expanduser(candidate)
+
+
 def apply_qos(domain: Any, intent: Dict[str, Any], target: Dict[str, Any] | None = None) -> Tuple[bool, Dict[str, Any]]:
     domain_name = domain["name"] if isinstance(domain, dict) and "name" in domain else str(domain)
 
@@ -120,15 +137,9 @@ def apply_qos(domain: Any, intent: Dict[str, Any], target: Dict[str, Any] | None
     port = int(target.get("port", 830))
     user = target.get("user") or target.get("username") or ""
     password = target.get("password") or ""
-    key_filename = (
-        target.get("key_filename")
-        or target.get("ssh_key")
-        or target.get("private_key")
-        or ""
-    )
+    key_filename = _resolve_key_filename(target)
     timeout = int(target.get("timeout", 10))
 
-    # Se o intent vier com floats tipo 2.0, isso agora vira "2" no XML.
     try:
         xml_cfg = _build_qos_xml(intent)
     except Exception as e:
@@ -167,6 +178,11 @@ def apply_qos(domain: Any, intent: Dict[str, Any], target: Dict[str, Any] | None
         info["exec"]["stderr"] = "missing authentication method: provide password or key_filename"
         return False, info
 
+    if key_filename and not os.path.exists(key_filename):
+        info["exec"]["stderr"] = "missing NETCONF private key"
+        info["exec"]["detail"] = f"FileNotFoundError: NETCONF key not found: {key_filename}"
+        return False, info
+
     try:
         connect_kwargs = {
             "host": host,
@@ -185,14 +201,12 @@ def apply_qos(domain: Any, intent: Dict[str, Any], target: Dict[str, Any] | None
             connect_kwargs["password"] = password
 
         with manager.connect(**connect_kwargs) as m:
-
             try:
                 m.edit_config(target="running", config=xml_cfg)
             except RPCError as e:
                 info["exec"]["stderr"] = f"RPCError: {e}"
                 return False, info
 
-            # read-back (padronização)
             try:
                 get_reply = m.get_config(
                     source="running",

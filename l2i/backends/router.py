@@ -11,9 +11,7 @@ Este código faz parte do artefato experimental associado ao artigo:
 SBRC 2026
 
 Licença: Apache License 2.0
-"""
 
-"""
 l2i/backends/router.py
 
 Seleciona módulos de backend por domínio (A, B, C) e por modo (mock|real).
