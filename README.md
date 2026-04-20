@@ -113,6 +113,8 @@ O artefato implementa:
 * protobuf==3.20.3
 * ncclient
 
+📖 Detalhes em: [docs/installation.md](docs/installation.md)
+
 ---
 
 # 🔐 Preocupações com segurança

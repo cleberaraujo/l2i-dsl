@@ -91,7 +91,9 @@ cd l2i-dsl
 
 ---
 
-## 2.2 Dependências do sistema
+## 2.2 Dependências
+
+### 2.2.1 Básicas
 
 ```bash
 sudo apt update
@@ -101,6 +103,34 @@ sudo apt install -y \
   iproute2 iputils-ping net-tools iperf3 fping graphviz \
   protobuf-compiler protobuf-compiler-grpc \
   thrift-compiler libthrift-dev libnanomsg-dev \
+  libgrpc++-dev libgrpc-dev
+```
+
+### 2.2.2 Dependências NETCONF
+
+```bash
+sudo apt install -y \
+  libssh-dev libssl-dev \
+  libcurl4-openssl-dev \
+  libpcre2-dev \
+  libprotobuf-c-dev protobuf-c-compiler \
+  libsystemd-dev \
+  libavl-dev libev-dev \
+  libsqlite3-dev
+```
+
+### 2.2.3 Dependências P4
+```bash
+sudo apt install -y \
+  libboost-dev libboost-system-dev libboost-filesystem-dev \
+  libboost-program-options-dev libboost-thread-dev \
+  libboost-test-dev libboost-iostreams-dev \
+  libboost-graph-dev libboost-regex-dev \
+  libfl-dev libgc-dev bison flex \
+  libreadline-dev libgmp-dev \
+  libpcap-dev \
+  thrift-compiler libthrift-dev \
+  libnanomsg-dev \
   libgrpc++-dev libgrpc-dev
 ```
 
@@ -270,6 +300,11 @@ sudo chown -R netconf:netconf /var/lib/netconf
 
 ```bash
 sudo sysrepoctl -i yang/l2i-qos.yang -s yang/
+```
+
+```bash
+sudo sysrepocfg --import=~/l2i-dsl/l2i-nacm-netconf-permit.xml -f xml -d running -m ietf-netconf-acm
+sudo sysrepocfg --import=~/l2i-dsl/l2i-nacm-netconf-permit.xml -f xml -d startup -m ietf-netconf-acm
 ```
 
 A política NACM permissiva está incluída no repositório e pode ser aplicada com `sysrepocfg`.
