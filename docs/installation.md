@@ -70,6 +70,11 @@ O script `setup_all.sh` executa automaticamente:
 
 Pode variar conforme CPU/RAM.
 
+⚠️ Este valores são referências obtidas nos sites dos desenvolvedores. No PC utilizado para o desenvolvimento, o tempo para compilação do Build P4 foi entre 11h a 12h. Caso demore para você, sugiro a utilização da VM disponibizada.
+
+📖 Detalhes em: [docs/vm.md](docs/vm.md)
+
+
 ---
 
 # 🛠️ 2. Instalação manual (detalhada)
