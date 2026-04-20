@@ -25,13 +25,42 @@ A avaliação é realizada em um ambiente baseado em:
 
 ---
 
+## 🎯 Objetivo do repositório
+
+Este repositório contém o **artefato experimental completo** associado ao artigo, com foco em:
+
+* reprodução de cenários experimentais
+* validação do pipeline declarativo L2i
+* execução em infraestrutura heterogênea real
+* análise de comportamento sob diferentes modos de operação
+
+O artefato é projetado para ser:
+
+* executável localmente
+* reproduzível
+* modular
+* independente de ferramentas externas complexas
+
+---
+
+## 🏅 Selos considerados
+
+Este artefato foi estruturado para solicitar os seguintes selos do CTA:
+
+- 🟢 **SeloD** — Artefato Disponível
+- 🟢 **SeloF** — Artefato Funcional
+- 🟢 **SeloS** — Artefato Sustentável
+- 🎯 **SeloR** — Experimentos Reprodutíveis (**objetivo principal**)
+
+---
+
 # 📂 Estrutura deste README
 
 Este documento está organizado conforme boas práticas de avaliação de artefatos:
 
 1. Informações básicas
 2. Dependências
-3. Segurança
+3. Preocupações com segurança
 4. Instalação
 5. Teste mínimo
 6. Experimentos
@@ -86,7 +115,7 @@ O artefato implementa:
 
 ---
 
-# 🔐 Segurança
+# 🔐 Preocupações com segurança
 
 O artefato:
 
@@ -107,6 +136,11 @@ Recomenda-se execução em ambiente isolado (VM ou máquina dedicada).
 chmod +x setup_all.sh
 ./setup_all.sh all
 ```
+
+## Manual
+
+📖 Detalhes em: [docs/installation.md](docs/installation.md)
+
 
 ---
 

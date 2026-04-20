@@ -20,6 +20,7 @@ Este documento descreve a organização do repositório, com foco em:
 ```text id="7ehhtp"
 .
 ├── README.md
+├── LICENSE
 ├── setup_all.sh
 ├── docs/
 ├── l2i/
@@ -32,7 +33,7 @@ Este documento descreve a organização do repositório, com foco em:
 ├── yang/
 ├── results/
 ├── figures/
-├── logs/
+└── logs/
 ```
 
 ---
