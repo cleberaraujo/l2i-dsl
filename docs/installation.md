@@ -93,7 +93,7 @@ A instalação manual é útil para:
 ## 2.1 Clonar repositório
 
 ```bash
-git clone <URL_DO_REPOSITORIO>
+git clone https://github.com/cleberaraujo/l2i-dsl.git
 cd l2i-dsl
 ```
 
