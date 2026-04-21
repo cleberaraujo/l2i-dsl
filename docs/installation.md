@@ -40,6 +40,8 @@ chmod +x setup_all.sh
 ./setup_all.sh all
 ```
 
+⚠️ Em caso de encerramento abrupto (falta de energia, queda de conexão, dentre outros) ou abortado, basta reexecutá-lo. O script está preparado para continuar de onde tirar parado.
+
 ---
 
 ## 🔧 O que o script faz
@@ -56,6 +58,7 @@ O script `setup_all.sh` executa automaticamente:
 * instalação do módulo YANG `l2i-qos`
 * aplicação de política NACM permissiva
 * validação básica do ambiente
+* continua de onde parou em casos de interrupção
 
 ---
 
