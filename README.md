@@ -133,14 +133,15 @@ Este artefato modifica o ambiente do sistema hospedeiro, incluindo:
 * Interferência na configuração de rede do hospedeiro
 * Persistência de configurações após a execução
 
-## 🛡️ Recomendações
 
-* Executar apenas em ambiente isolado (máquina virtual ou host dedicado)
-* Evitar uso em sistemas de produção ou com dados sensíveis
-* Revisar configurações de autenticação e controle de acesso
+## 🛠️ Boas práticas de execução
+* Revisar configurações de autenticação e controle de acesso antes da execução
+* Evitar execução em sistemas com dados sensíveis
+* Remover usuários e artefatos de rede criados ao final dos experimentos
 * Remover ou limpar namespaces e interfaces criados após o uso (`./scripts/s1_topology_cleanup.sh` `./scripts/s2_topology_cleanup.sh` `./scripts/cleanup_net.sh`), ou ainda reiniciar o host
 
-> 🚨 **Recomendação:** ratificamos que a execução em ambiente isolado (VM ou host dedicado) é fortemente indicada para mitigar riscos e garantir a reprodutibilidade dos experimentos.
+
+> 🚨 **Recomendação:** executar este artefato exclusivamente em ambiente isolado (máquina virtual ou host dedicado) mitiga significativamente os riscos descritos e atende às boas práticas de execução. Nesse contexto, a limpeza manual (ex.: remoção de usuários e artefatos de rede) pode ser dispensada quando o ambiente for descartado após o uso.
 
 
 ---
