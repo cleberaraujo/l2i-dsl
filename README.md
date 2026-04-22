@@ -138,9 +138,9 @@ Este artefato modifica o ambiente do sistema hospedeiro, incluindo:
 * Executar apenas em ambiente isolado (máquina virtual ou host dedicado)
 * Evitar uso em sistemas de produção ou com dados sensíveis
 * Revisar configurações de autenticação e controle de acesso
-* Remover usuários e artefatos de rede criados ao final
+* Remover ou limpar namespaces e interfaces criados após o uso (`./scripts/s1_topology_cleanup.sh` `./scripts/s2_topology_cleanup.sh` `./scripts/cleanup_net.sh`), ou ainda reiniciar o host
 
-> 🚨 **Recomendação:** a execução em ambiente isolado (VM ou máquina dedicada) é fortemente indicada para mitigar riscos e garantir a reprodutibilidade dos experimentos.
+> 🚨 **Recomendação:** ratificamos que a execução em ambiente isolado (VM ou host dedicado) é fortemente indicada para mitigar riscos e garantir a reprodutibilidade dos experimentos.
 
 
 ---
