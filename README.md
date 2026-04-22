@@ -119,14 +119,29 @@ O artefato implementa:
 
 # 🔐 Preocupações com segurança
 
-O artefato:
+Este artefato modifica o ambiente do sistema hospedeiro, incluindo:
 
-* cria usuário `netconf`
-* utiliza autenticação SSH por chave pública
-* aplica política NACM permissiva
-* cria namespaces de rede
+* Criação de usuário dedicado (`netconf`)
+* Configuração de autenticação SSH por chave pública
+* Aplicação de política NACM permissiva
+* Criação e manipulação de namespaces de rede e interfaces virtuais (veth)
 
-Recomenda-se execução em ambiente isolado (VM ou máquina dedicada).
+## ⚠️ Riscos potenciais
+
+* Exposição de serviços via SSH
+* Controle de acesso excessivamente permissivo
+* Interferência na configuração de rede do hospedeiro
+* Persistência de configurações após a execução
+
+## 🛡️ Recomendações
+
+* Executar apenas em ambiente isolado (máquina virtual ou host dedicado)
+* Evitar uso em sistemas de produção ou com dados sensíveis
+* Revisar configurações de autenticação e controle de acesso
+* Remover usuários e artefatos de rede criados ao final
+
+> 🚨 **Recomendação:** a execução em ambiente isolado (VM ou máquina dedicada) é fortemente indicada para mitigar riscos e garantir a reprodutibilidade dos experimentos.
+
 
 ---
 
