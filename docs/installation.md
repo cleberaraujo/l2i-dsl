@@ -1,6 +1,6 @@
 # ⚙️ Instalação e Preparação do Ambiente
 
-🏠 [README](../README.md) · 🧪 [Teste mínimo](minimal_test.md) · 📊 [Experimentos](experiments.md) · 🔁 [Pós-reboot](runtime_after_reboot.md)
+🏠 [README](../README.md) · 🧪 [Teste mínimo](minimal_test.md) · 📊 [Experimentos](experiments.md) · 🔁 [Pós-reboot](runtime_after_reboot.md) · 🖥️ [VM](vm.md)
 
 ---
 
@@ -8,102 +8,109 @@
 
 Este documento descreve como preparar o ambiente necessário para execução do artefato, incluindo:
 
-* instalação automatizada completa
-* instalação manual (transparência e depuração)
-* organização do ambiente local
+* instalação automatizada (recomendada)
+* instalação manual (transparência e controle)
+* organização do ambiente
 * preparação para execução dos cenários
 
 ---
 
-# 🧩 Organização do ambiente
+# 🚀 1. Caminho recomendado (instalação automática)
 
-O artefato assume a seguinte estrutura fora do repositório:
-
-```bash
-~/l2i-dsl        # repositório clonado
-~/l2i-src        # código-fonte de dependências (P4 e NETCONF)
-~/l2i-dev/venv   # ambiente virtual Python
-```
-
-Essa separação é importante para:
-
-* manter o repositório limpo
-* permitir reinstalações independentes
-* facilitar depuração e reprodutibilidade
-
----
-
-# 🚀 1. Instalação automática (recomendada)
-
-```bash
+```bash id="inst_auto01"
 chmod +x setup_all.sh
 ./setup_all.sh all
 ```
 
-⚠️ Em caso de encerramento abrupto (falta de energia, queda de conexão, dentre outros) ou abortado, basta reexecutá-lo. O script está preparado para continuar de onde tirar parado.
+Este é o método recomendado para avaliação do artefato.
 
 ---
 
-## 🔧 O que o script faz
+## 🔧 O que o script realiza
 
 O script `setup_all.sh` executa automaticamente:
 
 * instalação de dependências do sistema
-* criação (ou recriação) da `venv`
+* criação do ambiente virtual (`~/l2i-dev/venv`)
 * instalação de dependências Python
 * compilação do stack P4 (PI, bmv2, p4c)
 * compilação do stack NETCONF (libyang, sysrepo, libnetconf2, Netopeer2)
 * configuração do usuário `netconf`
 * configuração de autenticação SSH
-* instalação do módulo YANG `l2i-qos`
+* instalação do modelo YANG `l2i-qos`
 * aplicação de política NACM permissiva
-* validação básica do ambiente
-* continua de onde parou em casos de interrupção
+* validação do ambiente
+
+---
+
+## 🔁 Reexecução segura
+
+O script é **idempotente**:
+
+```bash id="inst_auto02"
+./setup_all.sh all
+```
+
+Pode ser reexecutado em caso de falha, interrupção ou dúvida sobre o estado do ambiente.
 
 ---
 
 ## ⏱️ Tempo esperado
 
-| Etapa                | Tempo      |
-| -------------------- | ---------- |
-| Dependências sistema | ~2–5 min   |
-| Build P4             | ~20–60 min |
-| Build NETCONF        | ~10–30 min |
-| Total                | ~30–90 min |
+| Etapa                | Tempo típico |
+| -------------------- | ------------ |
+| Dependências sistema | ~2–5 min     |
+| Build P4             | ~20–60 min   |
+| Build NETCONF        | ~10–30 min   |
+| Total                | ~30–90 min   |
 
-Pode variar conforme CPU/RAM.
+⚠️ Observação: em máquinas com poucos recursos, o tempo pode ser significativamente maior.
 
-⚠️ Este valores são referências obtidas nos sites dos desenvolvedores. No PC utilizado para o desenvolvimento, o tempo para compilação do Build P4 foi entre 11h a 12h. Caso demore para você, sugiro a utilização da VM disponibizada.
-
-📖 Detalhes em: [docs/vm.md](docs/vm.md)
-
+👉 Alternativa recomendada: uso da VM pré-configurada
+📖 [docs/vm.md](vm.md)
 
 ---
 
-# 🛠️ 2. Instalação manual (detalhada)
+# 🧩 2. Organização do ambiente
+
+O artefato assume a seguinte estrutura:
+
+```bash id="inst_layout01"
+~/l2i-dsl        # repositório clonado
+~/l2i-src        # código-fonte de dependências
+~/l2i-dev/venv   # ambiente virtual Python
+```
+
+Essa separação permite:
+
+* isolamento entre código e dependências
+* reinstalações independentes
+* maior reprodutibilidade
+
+---
+
+# 🛠️ 3. Instalação manual (controle completo)
 
 A instalação manual é útil para:
 
-* inspeção científica do ambiente
 * depuração
-* customização do sistema
+* inspeção científica
+* customização do ambiente
 
 ---
 
-## 2.1 Clonar repositório
+## 3.1 Clonar repositório
 
-```bash
+```bash id="inst_manual01"
 git clone https://github.com/cleberaraujo/l2i-dsl.git
 cd l2i-dsl
 ```
 
 ---
 
-## 2.2 Dependências
+## 3.2 Dependências do sistema
 
-### 2.2.1 Básicas
-
-```bash
+```bash id="inst_manual02"
 sudo apt update
 sudo apt install -y \
   python3 python3-venv python3-pip \
@@ -114,9 +121,24 @@ sudo apt install -y \
   libgrpc++-dev libgrpc-dev
 ```
 
-### 2.2.2 Dependências NETCONF
+---
 
-```bash
+## 3.3 Ambiente Python
+
+```bash id="inst_manual03"
+python3 -m venv ~/l2i-dev/venv
+source ~/l2i-dev/venv/bin/activate
+
+pip install --upgrade pip setuptools wheel
+pip install jsonschema pyyaml grpcio protobuf==3.20.3 \
+            ncclient cryptography paramiko \
+            grpcio-tools p4runtime-shell
+```
+---
+
+## 3.4 Dependências NETCONF
+
+```bash id="inst_manual04"
 sudo apt install -y \
   libssh-dev libssl-dev \
   libcurl4-openssl-dev \
@@ -126,9 +148,10 @@ sudo apt install -y \
   libavl-dev libev-dev \
   libsqlite3-dev
 ```
+---
 
-### 2.2.3 Dependências P4
-```bash
+## 3.5 Dependências P4
+```bash id="inst_manual05"
 sudo apt install -y \
   libboost-dev libboost-system-dev libboost-filesystem-dev \
   libboost-program-options-dev libboost-thread-dev \
@@ -144,21 +167,9 @@ sudo apt install -y \
 
 ---
 
-## 2.3 Ambiente Python
+## 3.6 Stack P4
 
-```bash
-python3 -m venv ~/l2i-dev/venv
-source ~/l2i-dev/venv/bin/activate
-
-pip install --upgrade pip setuptools wheel
-pip install jsonschema pyyaml grpcio protobuf==3.20.3 \
-            ncclient cryptography paramiko \
-            grpcio-tools p4runtime-shell
-```
-
----
-
-## 2.4 Stack P4 (em ~/l2i-src)
+Executado em `~/l2i-src`:
 
 ```bash
 mkdir -p ~/l2i-src
@@ -206,14 +217,11 @@ make -j2
 sudo make install
 sudo ldconfig
 ```
-
 ---
 
-## 2.5 Stack NETCONF (em ~/l2i-src)
+## 3.7 Stack NETCONF
 
-```bash
-cd ~/l2i-src
-```
+Executado em `~/l2i-src`:
 
 ### libyang
 
@@ -274,29 +282,19 @@ sudo ldconfig
 
 ---
 
-## 2.6 Configuração NETCONF
+## 3.8 Configuração NETCONF
 
-### Criar usuário
-
-```bash
+```bash id="inst_netconf01"
 sudo useradd --system --shell /usr/sbin/nologin \
              --home-dir /var/lib/netconf \
              --create-home netconf
 ```
 
----
-
-### Gerar chave SSH
-
-```bash
+```bash id="inst_netconf02"
 ssh-keygen -t rsa -b 2048 -f ~/.ssh/l2i_netconf_key -N ""
 ```
 
----
-
-### Instalar chave
-
-```bash
+```bash id="inst_netconf03"
 sudo mkdir -p /var/lib/netconf/.ssh
 sudo cp ~/.ssh/l2i_netconf_key.pub /var/lib/netconf/.ssh/authorized_keys
 sudo chown -R netconf:netconf /var/lib/netconf
@@ -304,44 +302,40 @@ sudo chown -R netconf:netconf /var/lib/netconf
 
 ---
 
-## 2.7 Instalar YANG e NACM
+## 3.9 YANG e NACM
 
-```bash
+```bash id="inst_netconf04"
 sudo sysrepoctl -i yang/l2i-qos.yang -s yang/
 ```
 
-```bash
+```bash id="inst_netconf05"
 sudo sysrepocfg --import=~/l2i-dsl/l2i-nacm-netconf-permit.xml -f xml -d running -m ietf-netconf-acm
 sudo sysrepocfg --import=~/l2i-dsl/l2i-nacm-netconf-permit.xml -f xml -d startup -m ietf-netconf-acm
 ```
 
-A política NACM permissiva está incluída no repositório e pode ser aplicada com `sysrepocfg`.
-
 ---
 
-# 🔁 3. Após instalação
+# 🔁 4. Após instalação
 
-Nenhuma compilação adicional é necessária após a instalação inicial.
+Nenhuma recompilação é necessária após a instalação inicial.
 
-Para uso contínuo:
+Uso típico:
 
-```bash
+```bash id="inst_post01"
 source ~/l2i-dev/venv/bin/activate
 ./setup_all.sh start_real_services
 ```
 
 ---
 
-# 🧪 4. Preparação para execução
+# 🧪 5. Preparação para execução
 
-Antes de rodar os cenários:
+Antes de executar cenários:
 
-* ambiente Python deve estar ativo
-* serviços devem estar em execução
+* ambiente Python ativo
+* serviços em execução
 
-Execução típica:
-
-```bash
+```bash id="inst_ready01"
 ./setup_all.sh run_s1_real
 ```
 
@@ -349,10 +343,10 @@ Execução típica:
 
 # ⚠️ Observações importantes
 
-* O build do P4 pode ser demorado
-* máquinas com pouca RAM devem usar `MAKE_JOBS=2`
-* swap pode impactar significativamente o tempo de build
-* a VM fornecida evita esse custo
+* build P4 pode ser demorado
+* memória limitada impacta compilação
+* uso de `MAKE_JOBS=2` recomendado em ambientes restritos
+* VM evita custo de build
 
 ---
 
@@ -360,10 +354,10 @@ Execução típica:
 
 Este processo garante:
 
-* instalação completa do ambiente
-* isolamento entre componentes
-* reprodutibilidade consistente
-* execução independente dos cenários
+* instalação completa
+* ambiente isolado
+* execução reprodutível
+* suporte a execução automática e manual
 
 ---
 

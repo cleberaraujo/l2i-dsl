@@ -15,81 +15,28 @@ Este teste valida, de forma rápida e determinística, que:
 
 ---
 
-## ✅ Pré-requisitos
-
-Antes de iniciar, é necessário que a instalação tenha sido concluída:
-
-```bash
-./setup_all.sh all
-```
-
-ou processo manual equivalente.
-
----
-
-## 🚀 Passo 1 — Ativar ambiente Python
+# 🚀 Fluxo mínimo (recomendado)
 
 ```bash
 source ~/l2i-dev/venv/bin/activate
-```
-
-Verificação opcional:
-
-```bash
-which python
-python -V
-```
-
----
-
-## 🚀 Passo 2 — Subir serviços reais
-
-```bash
 ./setup_all.sh start_real_services
-```
-
-Este comando:
-
-* inicia o servidor NETCONF (porta 830)
-* inicia o switch P4 (porta 9559)
-* aplica o pipeline P4
-
----
-
-## 🔍 Passo 3 — Validar serviços
-
-```bash
-ss -ltnp | grep 830
-ss -ltnp | grep 9559
-```
-
-### Resultado esperado
-
-* `*:830` em LISTEN → NETCONF ativo
-* `*:9559` em LISTEN → P4 ativo
-
----
-
-## 🚀 Passo 4 — Executar cenário S1 (modo real)
-
-```bash
 ./setup_all.sh run_s1_real
 ```
 
-Durante a execução, o sistema irá:
+---
 
-* criar a topologia (namespaces + veth)
-* aplicar configurações em:
+## ⏱️ Tempo esperado
 
-  * domínio A (Linux tc)
-  * domínio B (NETCONF/YANG)
-  * domínio C (P4)
-* gerar tráfego (iperf3)
-* coletar métricas e artefatos
+| Etapa               | Tempo típico |
+| ------------------- | ------------ |
+| start_real_services | ~5–10 s      |
+| execução S1         | ~10–30 s     |
 
 ---
 
-## 🔍 Passo 5 — Validar resultados
+# 🔍 Verificação
+
+Após a execução:
 
 ```bash
 grep -R '"backend_apply"' results/ -n
@@ -99,7 +46,7 @@ grep -R '"backend_apply"' results/ -n
 
 ## ✅ Resultado esperado
 
-No arquivo de sumário do S1:
+No arquivo de sumário do cenário S1:
 
 ```json
 "backend_apply": {
@@ -111,61 +58,103 @@ No arquivo de sumário do S1:
 
 ---
 
-## 📌 Interpretação
+# 🧠 Interpretação
 
-Se todos os domínios retornarem `true`, então:
+Este resultado indica que:
 
 * a especificação declarativa foi interpretada corretamente
 * o pipeline de tradução foi executado
-* a aplicação ocorreu em múltiplos domínios reais
-* a integração fim a fim está funcional
+* a materialização ocorreu em três domínios distintos
+* a execução fim a fim foi bem-sucedida
+
+Isso constitui uma evidência direta de funcionamento do modelo proposto no artigo.
 
 ---
 
-## ⚠️ Problemas comuns
+# 🔎 Execução passo a passo (opcional)
 
-### ❌ Porta 830 não ativa
+Para inspeção detalhada:
+
+---
+
+## 1) Ativar ambiente Python
+
+```bash
+source ~/l2i-dev/venv/bin/activate
+```
+
+---
+
+## 2) Subir serviços reais
+
+```bash
+./setup_all.sh start_real_services
+```
+
+---
+
+## 3) Verificar serviços
+
+```bash
+ss -ltnp | grep 830
+ss -ltnp | grep 9559
+```
+
+Resultado esperado:
+
+* `*:830` → NETCONF ativo
+* `*:9559` → P4 ativo
+
+---
+
+## 4) Executar cenário S1
+
+```bash
+./setup_all.sh run_s1_real
+```
+
+---
+
+# ⚠️ Problemas comuns
+
+---
+
+## ❌ Porta 830 não ativa
 
 ➡️ NETCONF não iniciou corretamente
 
-Solução:
-
 ```bash
 ./setup_all.sh start_real_services
 ```
 
 ---
 
-### ❌ Porta 9559 não ativa
+## ❌ Porta 9559 não ativa
 
 ➡️ P4 não iniciou corretamente
 
-Solução:
-
 ```bash
 ./setup_all.sh start_real_services
 ```
 
 ---
 
-### ❌ backend_apply B = false
+## ❌ backend_apply B = false
 
 ➡️ falha no domínio NETCONF
 
 Verificar:
 
 * usuário `netconf`
-* chave SSH
+* chave SSH (`~/.ssh/l2i_netconf_key`)
 * módulo YANG `l2i-qos`
 * política NACM
 
 ---
 
-### ❌ backend_apply C = false
+## ❌ backend_apply C = false
 
 ➡️ falha no domínio P4
-
-Verificar:
 
 ```bash
 ss -ltnp | grep 9559
@@ -173,21 +162,17 @@ ss -ltnp | grep 9559
 
 ---
 
-## ⏱️ Tempo esperado
+# 📌 Conclusão
 
-| Etapa               | Tempo    |
-| ------------------- | -------- |
-| start_real_services | ~5–10 s  |
-| execução S1         | ~10–30 s |
+Se o teste mínimo for bem-sucedido, o artefato:
 
----
-
-## 🧠 Observação
-
-Este teste foi projetado para validar o sistema **ponta a ponta**, com mínima intervenção do usuário.
-
-Para exploração completa dos cenários e parâmetros:
-
-👉 [docs/experiments.md](experiments.md)
+* está corretamente instalado
+* possui serviços operacionais
+* executa o pipeline declarativo
+* produz materialização multidomínio
 
 ---
+
+👉 Para execução completa e controle experimental:
+
+📊 [docs/experiments.md](experiments.md)

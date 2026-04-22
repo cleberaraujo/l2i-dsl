@@ -6,21 +6,21 @@
 
 ## 🎯 Objetivo
 
-Este documento apresenta as principais reivindicações do artefato, associando:
+Este documento apresenta as principais reivindicações do artefato, estabelecendo uma ligação explícita entre:
 
-* procedimento de execução
+* execução experimental
 * evidência observável
 * interpretação dos resultados
 
-Cada reivindicação pode ser verificada de forma independente.
+Cada reivindicação pode ser validada de forma independente.
 
 ---
 
-# 📌 Reivindicação 1 — Inicialização da infraestrutura multidomínio
+# 📌 Reivindicação 1 — Inicialização multidomínio
 
 ## Enunciado
 
-A infraestrutura composta por três domínios heterogêneos pode ser inicializada simultaneamente em um único ambiente.
+A infraestrutura composta por múltiplos domínios heterogêneos pode ser inicializada simultaneamente em um único ambiente.
 
 ---
 
@@ -41,26 +41,16 @@ ss -ltnp | grep 9559
 
 ---
 
-## ⏱️ Tempo esperado
+## ✅ Resultado esperado
 
-~5–10 segundos
-
----
-
-## 💻 Recursos
-
-CPU leve, sem tráfego significativo
+* porta 830 ativa → NETCONF
+* porta 9559 ativa → P4
 
 ---
 
 ## 🧠 Interpretação
 
-A ativação simultânea de:
-
-* NETCONF (porta 830)
-* P4 (porta 9559)
-
-indica que os domínios estão operacionais e prontos para execução conjunta.
+A ativação simultânea dos serviços indica que os domínios estão prontos para execução coordenada.
 
 ---
 
@@ -68,7 +58,7 @@ indica que os domínios estão operacionais e prontos para execução conjunta.
 
 ## Enunciado
 
-Uma especificação declarativa pode ser processada, traduzida e aplicada em múltiplos domínios de forma consistente.
+Uma especificação declarativa pode ser processada e materializada em múltiplos domínios.
 
 ---
 
@@ -88,7 +78,7 @@ grep -R '"backend_apply"' results/ -n
 
 ---
 
-## Resultado esperado
+## ✅ Resultado esperado
 
 ```json id="c2_json"
 "backend_apply": {
@@ -100,40 +90,25 @@ grep -R '"backend_apply"' results/ -n
 
 ---
 
-## ⏱️ Tempo esperado
-
-~10–30 segundos
-
----
-
-## 💻 Recursos
-
-CPU: 1–2 cores
-RAM: ~2 GB
-
----
-
 ## 🧠 Interpretação
 
-Indica que:
+Indica execução completa do pipeline:
 
-* a especificação foi validada
-* a tradução foi realizada corretamente
-* a materialização ocorreu em todos os domínios
+* validação da especificação
+* tradução
+* aplicação nos três domínios
 
 ---
 
-# 📌 Reivindicação 3 — Materialização multidomínio da intenção
+# 📌 Reivindicação 3 — Materialização multidomínio
 
 ## Enunciado
 
-Uma única intenção declarativa é materializada de forma consistente em múltiplas tecnologias de L2.
+Uma única intenção declarativa é materializada de forma consistente em múltiplas tecnologias.
 
 ---
 
 ## ▶️ Procedimento
-
-Executar S1:
 
 ```bash id="c3_proc"
 ./setup_all.sh run_s1_real
@@ -149,29 +124,33 @@ Arquivos em:
 results/S1/
 ```
 
-Incluem:
+---
 
-* sumário global
-* artefatos por domínio
-* dumps de configuração
+## ✅ Resultado esperado
+
+Presença de artefatos por domínio:
+
+* `domain_A.json`
+* `domain_B.json`
+* `domain_C.json`
 
 ---
 
 ## 🧠 Interpretação
 
-A existência de artefatos distintos por domínio demonstra:
+Demonstra:
 
 * decomposição da intenção
-* tradução para diferentes backends
-* preservação semântica entre tecnologias
+* tradução heterogênea
+* preservação semântica
 
 ---
 
-# 📌 Reivindicação 4 — Separação entre validação lógica e execução real
+# 📌 Reivindicação 4 — Separação entre validação e execução
 
 ## Enunciado
 
-O sistema distingue claramente entre validação lógica (mock) e execução real.
+O sistema separa claramente validação lógica e execução real.
 
 ---
 
@@ -186,8 +165,10 @@ O sistema distingue claramente entre validação lógica (mock) e execução rea
 
 ## 📊 Evidência
 
-* `mock`: não altera estado da rede
-* `real`: altera comportamento observável
+Diferença entre:
+
+* modo `mock` → validação sem efeitos
+* modo `real` → aplicação efetiva
 
 ---
 
@@ -195,16 +176,17 @@ O sistema distingue claramente entre validação lógica (mock) e execução rea
 
 Permite:
 
-* validar DSL independentemente da infraestrutura
-* isolar erros de tradução vs execução
+* depuração controlada
+* isolamento de erros
+* validação incremental
 
 ---
 
-# 📌 Reivindicação 5 — Adaptação dinâmica via L2i
+# 📌 Reivindicação 5 — Adaptação dinâmica
 
 ## Enunciado
 
-O modo adaptativo altera o comportamento da rede em relação ao baseline.
+O comportamento da rede varia conforme o modo de execução.
 
 ---
 
@@ -228,25 +210,25 @@ sudo ~/l2i-dev/venv/bin/python -m scenarios.multidomain_s1 \
 
 ## 📊 Evidência
 
-Diferenças em:
+Diferenças observáveis em:
 
 * vazão
 * latência
-* isolamento de fluxos
+* isolamento
 
 ---
 
 ## 🧠 Interpretação
 
-Evidencia o impacto direto da abordagem declarativa na adaptação da rede.
+Evidencia a capacidade de adaptação dinâmica do modelo declarativo.
 
 ---
 
-# 📌 Reivindicação 6 — Suporte a multicast orientado à origem com adaptação temporal
+# 📌 Reivindicação 6 — Suporte a multicast orientado à origem
 
 ## Enunciado
 
-O sistema suporta multicast orientado à origem com adaptação dinâmica a eventos.
+O sistema suporta multicast com adaptação a eventos dinâmicos.
 
 ---
 
@@ -260,48 +242,36 @@ O sistema suporta multicast orientado à origem com adaptação dinâmica a even
 
 ## 📊 Evidência
 
-* execução completa
-* geração de séries temporais
-* resposta ao evento `join`
+Arquivos em:
 
----
-
-## ⏱️ Tempo esperado
-
-~20–40 segundos
-
----
-
-## 💻 Recursos
-
-CPU moderado (tráfego ativo)
-RAM ~2–4 GB
+```bash id="c6_ev"
+results/S2/
+```
 
 ---
 
 ## 🧠 Interpretação
 
-Indica que:
+Indica:
 
-* o sistema reage a eventos dinâmicos
-* a configuração multicast é adaptada em tempo de execução
-* há convergência para estado estável
+* suporte a múltiplos receptores
+* adaptação a eventos (join)
+* convergência do sistema
 
 ---
 
-# 📌 Reivindicação 7 — Reprodutibilidade experimental
+# 📌 Reivindicação 7 — Reprodutibilidade
 
 ## Enunciado
 
-Os experimentos podem ser reproduzidos de forma consistente com baixa variabilidade.
+Os experimentos produzem resultados consistentes sob repetição.
 
 ---
 
 ## ▶️ Procedimento
 
-Executar múltiplas vezes:
-
 ```bash id="c7_proc"
+./setup_all.sh run_s1_real
 ./setup_all.sh run_s1_real
 ```
 
@@ -309,36 +279,33 @@ Executar múltiplas vezes:
 
 ## 📊 Evidência
 
-* resultados consistentes em `results/`
-* variação limitada em métricas
+Comparação de arquivos em:
+
+```bash id="c7_ev"
+results/S1/
+```
 
 ---
 
 ## 🧠 Interpretação
 
-Indica que:
+Indica:
 
-* o ambiente é controlado
-* o pipeline é determinístico
-* o artefato é reprodutível
-
----
-
-# 🔁 Fluxo recomendado
-
-```text id="c_flow"
-1. instalação
-2. start_real_services
-3. run_s1_real
-4. run_s2_real
-```
+* baixa variabilidade
+* comportamento previsível
+* ambiente controlado
 
 ---
 
-# 📌 Observações finais
+# 📌 Resumo
 
-* todas as evidências são geradas automaticamente
-* não há dependência externa adicional
-* os resultados podem ser analisados diretamente a partir dos artefatos gerados
+As reivindicações demonstram que o artefato:
+
+* executa pipeline declarativo completo
+* opera em múltiplos domínios
+* suporta adaptação dinâmica
+* apresenta comportamento reprodutível
 
 ---
+
+👉 Execução detalhada: [docs/experiments.md](experiments.md)

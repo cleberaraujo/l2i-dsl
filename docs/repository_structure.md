@@ -6,18 +6,18 @@
 
 ## 🎯 Objetivo
 
-Este documento descreve a organização do repositório, com foco em:
+Descrever a organização do repositório com foco em:
 
 * separação de responsabilidades
 * rastreabilidade entre especificação, execução e resultados
-* suporte à reprodutibilidade experimental
+* suporte à reprodutibilidade
 * facilidade de navegação e extensão
 
 ---
 
 # 📁 Visão geral
 
-```text id="7ehhtp"
+```text
 .
 ├── README.md
 ├── LICENSE
@@ -40,13 +40,13 @@ Este documento descreve a organização do repositório, com foco em:
 
 # 🧠 Organização conceitual
 
-A estrutura do repositório segue três camadas principais:
-
-```text id="1dq9vr"
+```text
 [ Especificação ] → [ Processamento ] → [ Execução ] → [ Resultados ]
 ```
 
-Mapeamento:
+---
+
+## 🔗 Mapeamento
 
 | Camada        | Diretórios                                  |
 | ------------- | ------------------------------------------- |
@@ -61,29 +61,18 @@ Mapeamento:
 
 ## 📐 `l2i/`
 
-Implementa a DSL e o pipeline declarativo.
+Núcleo lógico do sistema:
 
-Inclui:
-
-* modelos de dados
+* DSL declarativa
 * validação semântica
 * tradução para backends
 * composição de intenções
-
-Este diretório representa o núcleo lógico do sistema.
 
 ---
 
 ## 🧪 `scenarios/`
 
-Define os cenários experimentais executáveis.
-
-Principais:
-
-* `multidomain_s1.py`
-* `multicast_s2_recovery_stable5.py`
-
-Responsabilidades:
+Define cenários experimentais:
 
 * criação de topologia
 * geração de tráfego
@@ -94,25 +83,22 @@ Responsabilidades:
 
 ## ⚙️ `scripts/`
 
-Contém scripts auxiliares de suporte.
+Scripts auxiliares:
 
-Exemplos:
-
-* inicialização do ambiente P4
-* configuração de serviços
-* utilitários de execução
+* inicialização do ambiente
+* controle de serviços
+* automação de execução
 
 ---
 
 ## 📄 `specs/`
 
-Especificações declarativas utilizadas como entrada da DSL.
+Entradas declarativas:
 
-```text id="9o5m6o"
-specs/
-└── valid/
-    ├── s1_unicast_qos.json
-    └── s2_multicast_source_oriented.json
+```text
+specs/valid/
+├── s1_unicast_qos.json
+└── s2_multicast_source_oriented.json
 ```
 
 ---
@@ -122,7 +108,6 @@ specs/
 Define os esquemas de validação (JSON Schema).
 
 Responsável por:
-
 * validação estrutural
 * consistência das especificações
 
@@ -133,7 +118,6 @@ Responsável por:
 Define perfis de execução e parâmetros auxiliares.
 
 Pode incluir:
-
 * políticas de tradução
 * parâmetros específicos de backend
 * configurações experimentais
@@ -144,10 +128,6 @@ Pode incluir:
 
 Modelos YANG utilizados no domínio NETCONF.
 
-Principal:
-
-* `l2i-qos.yang`
-
 ---
 
 ## 🔌 `p4src/`
@@ -155,7 +135,6 @@ Principal:
 Código-fonte P4 utilizado no domínio C.
 
 Inclui:
-
 * definição do pipeline
 * tabelas e ações
 * lógica de encaminhamento
@@ -185,6 +164,7 @@ Inclui:
 * sumários
 * dados por domínio
 * métricas auxiliares
+* dumps (comandos reais utilizados pelas tecnologias)
 
 ---
 
@@ -193,7 +173,6 @@ Inclui:
 Arquivos auxiliares para geração de figuras.
 
 Pode conter:
-
 * scripts gnuplot
 * dados agregados
 * versões finais de gráficos
@@ -202,19 +181,16 @@ Pode conter:
 
 ## 🧾 `logs/`
 
-Registros de execução.
-
-Exemplos:
-
-* logs do bmv2
-* logs do NETCONF
-* logs dos cenários
+Registros de execução:
+* P4 (bmv2)
+* NETCONF
+* cenários
 
 ---
 
 # 🔄 Fluxo de dados
 
-```text id="z9qux7"
+```text
 specs/ → l2i/ → scenarios/ → results/
            ↓
         backends
@@ -223,21 +199,9 @@ specs/ → l2i/ → scenarios/ → results/
 
 ---
 
-# 🔁 Relação com execução
-
-Fluxo típico:
-
-```text id="7clx8p"
-specificação → validação → tradução → aplicação → coleta → análise
-```
-
-Cada etapa corresponde diretamente a um subconjunto da estrutura do repositório.
-
----
-
 # 🧩 Extensibilidade
 
-O repositório pode ser estendido em diferentes pontos:
+O sistema pode ser estendido em:
 
 * novos cenários → `scenarios/`
 * novas intenções → `specs/`
@@ -247,12 +211,11 @@ O repositório pode ser estendido em diferentes pontos:
 
 ---
 
-# 📌 Observações finais
+# 📌 Observações
 
-* todos os caminhos são relativos ao repositório
-* a estrutura favorece reprodutibilidade e isolamento
-* diretórios seguem separação clara de responsabilidades
-* a pasta `results/` pode crescer rapidamente (uso de `.gitignore` recomendado)
+* caminhos são relativos ao repositório
+* estrutura favorece isolamento e reprodutibilidade
+* diretório `results/` pode crescer rapidamente
 
 ---
 

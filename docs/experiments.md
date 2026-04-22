@@ -6,12 +6,12 @@
 
 ## 🎯 Objetivo
 
-Este documento descreve como executar, controlar e interpretar os experimentos do artefato, incluindo:
+Este documento descreve como executar e analisar os experimentos do artefato, com foco em:
 
-* execução automatizada e manual
-* controle fino de parâmetros
-* análise de métricas
-* validação das propriedades experimentais
+* reprodução dos cenários do artigo
+* controle dos parâmetros experimentais
+* coleta de evidências
+* interpretação dos resultados
 
 ---
 
@@ -42,74 +42,66 @@ A avaliação é estruturada em dois eixos ortogonais:
 
 ---
 
-# 🧪 2. Testbed
+# 🚀 2. Execução rápida (recomendada)
 
-Os experimentos utilizam:
-
-* network namespaces
-* enlaces `veth`
-* controle via `tc`
-* medições com `iperf3` e `ping`
-
----
-
-# 📐 3. Cenários
-
-## 🔀 S1 — Unicast QoS
-
-Avalia:
-
-* isolamento de fluxos
-* garantia de banda
-* comportamento sob contenção
-
----
-
-## 🌳 S2 — Multicast orientado à origem
-
-Avalia:
-
-* eventos dinâmicos (`join`)
-* adaptação temporal
-* estabilidade pós-recuperação
-
----
-
-# ▶️ 4. Execução automatizada
-
-```bash id="t_auto01"
+```bash id="exp_fast01"
 ./setup_all.sh run_s1_real
 ./setup_all.sh run_s2_real
 ```
 
 ---
 
-# 🧪 5. Execução manual (controle total)
+## ⏱️ Tempo esperado
 
-## Ordem obrigatória
-
-```text id="t_order01"
-NETCONF → P4 → pipeline → topologia → experimento
-```
+| Cenário | Tempo típico |
+| ------- | ------------ |
+| S1      | ~10–30 s     |
+| S2      | ~20–40 s     |
 
 ---
 
-## Subir ambiente
+# 🧪 3. Cenários experimentais
 
-```bash id="t_manual01"
-sudo /usr/local/sbin/netopeer2-server -d
+---
+
+## 🔹 S1 — Unicast com QoS
+
+Objetivo:
+
+* validar controle de largura de banda
+* observar isolamento entre fluxos
+* avaliar comportamento baseline vs adapt
+
+---
+
+## 🔹 S2 — Multicast orientado à origem
+
+Objetivo:
+
+* validar adaptação dinâmica
+* observar convergência após eventos
+* analisar estabilidade temporal
+
+---
+
+# ⚙️ 4. Execução controlada (manual)
+
+Esta seção descreve a execução com controle fino, equivalente aos experimentos do artigo.
+
+---
+
+## 4.1 Pré-requisitos
+
+```bash id="exp_manual01"
 source ~/l2i-dev/venv/bin/activate
-cd ~/l2i-dsl
-./scripts/p4_build_and_run.sh
-python scripts/p4_push_pipeline.py --addr 127.0.0.1:9559
-sudo ./scripts/s1_topology_setup.sh
+./setup_all.sh start_real_services
 ```
 
 ---
 
-## Execução S1
+## 4.2 Cenário S1
 
-```bash id="t_manual02"
+```bash id="exp_s1_manual"
 sudo ~/l2i-dev/venv/bin/python -m scenarios.multidomain_s1 \
   --spec specs/valid/s1_unicast_qos.json \
   --duration 30 \
@@ -122,9 +114,9 @@ sudo ~/l2i-dev/venv/bin/python -m scenarios.multidomain_s1 \
 
 ---
 
-## Execução S2
+## 4.3 Cenário S2
 
-```bash id="t_manual03"
+```bash id="exp_s2_manual"
 sudo ~/l2i-dev/venv/bin/python -m scenarios.multicast_s2_recovery_stable5 \
   --spec specs/valid/s2_multicast_source_oriented.json \
   --duration 30 \
@@ -142,60 +134,47 @@ sudo ~/l2i-dev/venv/bin/python -m scenarios.multicast_s2_recovery_stable5 \
 
 ---
 
-# ⏱️ 6. Tempo esperado
+# 📊 5. Resultados
 
-| Etapa               | Tempo típico |
-| ------------------- | ------------ |
-| start_real_services | ~5–10 s      |
-| S1                  | ~10–30 s     |
-| S2                  | ~20–40 s     |
+Os resultados são armazenados em:
 
----
-
-# 💻 7. Consumo de recursos
-
-| Recurso | Estimativa |
-| ------- | ---------- |
-| CPU     | 1–2 cores  |
-| RAM     | ~2–4 GB    |
-| Disco   | ~1–2 GB    |
-
-Observações:
-
-* build inicial (P4/NETCONF) requer mais recursos
-* execução dos cenários é leve
-
----
-
-# 📊 8. Métricas avaliadas
-
-* latência (percentis, ex.: P99)
-* vazão
-* impacto de tráfego concorrente
-* conformidade semântica
-* tempo até estabilidade (S2)
-
----
-
-# 📂 9. Resultados
-
-```bash id="t_results01"
-results/S1/
-results/S2/
+```bash id="exp_results01"
+results/
 ```
 
-Cada execução gera:
+---
 
-* JSON (sumário)
-* CSV (séries temporais)
-* dumps de configuração
-* logs
+## Estrutura típica
+
+```text id="exp_struct01"
+results/
+├── S1/
+│   ├── S1_<timestamp>.json
+│   ├── S1_<timestamp>_domain_A.json
+│   ├── S1_<timestamp>_domain_B.json
+│   └── S1_<timestamp>_domain_C.json
+└── S2/
+    └── ...
+```
 
 ---
 
-# 📌 10. Resultado esperado
+## Conteúdo
 
-```json id="t_expected01"
+* sumário global
+* dados por domínio
+* métricas auxiliares
+* dumps de configuração
+
+---
+
+# 🔍 6. O que observar
+
+---
+
+## ✔️ Execução bem-sucedida
+
+```json id="exp_success01"
 "backend_apply": {
   "A": true,
   "B": true,
@@ -205,52 +184,100 @@ Cada execução gera:
 
 ---
 
-# 🧠 11. Interpretação
+## ✔️ Domínio A (Linux tc)
 
-Esse resultado indica:
-
-* aplicação consistente em múltiplos domínios
-* tradução correta da intenção
-* execução fim a fim do pipeline
+* aplicação de classes
+* limitação de banda
 
 ---
 
-# 🔁 12. Reprodutibilidade
+## ✔️ Domínio B (NETCONF)
 
-Recomenda-se:
-
-* executar cada cenário pelo menos 3 vezes
-* comparar variações de throughput e latência
-* analisar estabilidade temporal (S2)
+* envio de configuração YANG
+* alteração do estado running
 
 ---
 
-# 🧪 13. Variações experimentais
+## ✔️ Domínio C (P4)
 
-Exemplos:
-
-* aumentar `be-mbps` → maior contenção
-* reduzir `bwB` → gargalo em domínio intermediário
-* alterar `phase-splits` → impacto no tempo de recuperação
+* pipeline carregado
+* comportamento coerente com intenção
 
 ---
 
-# 🧹 14. Limpeza
+# 📈 7. Interpretação científica
 
-```bash id="t_cleanup01"
-sudo ./scripts/s1_topology_cleanup.sh
-sudo ./scripts/cleanup_net.sh
+Os experimentos demonstram:
+
+* separação entre intenção e implementação
+* tradução consistente entre domínios
+* capacidade de adaptação dinâmica
+* previsibilidade sob contenção
+
+---
+
+# 🔁 8. Repetição e variabilidade
+
+Para avaliar estabilidade:
+
+```bash id="exp_repeat01"
+./setup_all.sh run_s1_real
+./setup_all.sh run_s1_real
+```
+
+Comparar resultados em:
+
+```bash id="exp_repeat02"
+results/S1/
 ```
 
 ---
 
-# ✔️ 15. Verificações
+# ⚠️ 9. Problemas comuns
 
-```bash id="t_check01"
+---
+
+## ❌ backend_apply = false
+
+Indica falha em algum domínio.
+
+---
+
+### NETCONF
+
+```bash id="exp_troubleshoot01"
 ss -ltnp | grep 830
+```
+
+---
+
+### P4
+
+```bash id="exp_troubleshoot02"
 ss -ltnp | grep 9559
 ```
 
 ---
 
-👉 Próximo: [docs/claims.md](claims.md)
+## ❌ resultados inconsistentes
+
+Possíveis causas:
+
+* recursos limitados
+* interferência de processos
+* execução concorrente
+
+---
+
+# 📌 10. Conclusão
+
+Este conjunto de experimentos permite:
+
+* reproduzir os cenários do artigo
+* validar o pipeline declarativo
+* observar comportamento multidomínio
+* analisar adaptação dinâmica
+
+---
+
+👉 Evidências formais: [docs/claims.md](claims.md)
