@@ -77,6 +77,49 @@ else
   exit 1
 fi
 
+DEPENDENCY_LOCK="${DEPENDENCY_LOCK:-$REPO_DIR/config/dependencies.env}"
+if [[ ! -f "$DEPENDENCY_LOCK" ]]; then
+  err "Arquivo canônico de dependências não encontrado: $DEPENDENCY_LOCK"
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$DEPENDENCY_LOCK"
+
+require_dependency_lock() {
+  local name value
+  local commit_variables=(
+    L2I_PI_REF
+    L2I_BMV2_REF
+    L2I_P4C_REF
+    L2I_SYSREPO_REF
+    L2I_LIBNETCONF2_REF
+    L2I_NETOPEER2_REF
+  )
+  local version_variables=(
+    L2I_LIBYANG_UPSTREAM_VERSION
+    L2I_PROTOBUF_UPSTREAM_VERSION
+    L2I_GRPC_UPSTREAM_VERSION
+  )
+
+  for name in "${commit_variables[@]}"; do
+    value="${!name:-}"
+    [[ "$value" =~ ^[0-9a-f]{40}$ ]] || {
+      err "Revisão inválida ou ausente em $DEPENDENCY_LOCK: $name=${value:-<vazio>}"
+      exit 1
+    }
+  done
+
+  for name in "${version_variables[@]}"; do
+    value="${!name:-}"
+    [[ -n "$value" ]] || {
+      err "Versão ausente em $DEPENDENCY_LOCK: $name"
+      exit 1
+    }
+  done
+}
+
+require_dependency_lock
+
 require_repo_layout() {
   [[ -d "$REPO_DIR/l2i" && -d "$REPO_DIR/scenarios" && -d "$REPO_DIR/scripts" ]] || {
     err "Layout do repositório inválido em $REPO_DIR."
@@ -109,7 +152,6 @@ P4_PORT="${P4_PORT:-9559}"
 P4_ADDR="${P4_ADDR:-127.0.0.1:${P4_PORT}}"
 
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
-BUILD_DIR_LIBYANG="${BUILD_DIR_LIBYANG:-$NET_SRC_DIR/build-libyang}"
 BUILD_DIR_SYSREPO="${BUILD_DIR_SYSREPO:-$NET_SRC_DIR/build-sysrepo}"
 BUILD_DIR_LIBNETCONF2="${BUILD_DIR_LIBNETCONF2:-$NET_SRC_DIR/build-libnetconf2}"
 BUILD_DIR_NETOPEER2="${BUILD_DIR_NETOPEER2:-$NET_SRC_DIR/build-Netopeer2}"
@@ -117,7 +159,6 @@ BUILD_DIR_PI="${BUILD_DIR_PI:-$NET_SRC_DIR/build-PI}"
 BUILD_DIR_BMV2="${BUILD_DIR_BMV2:-$NET_SRC_DIR/build-behavioral-model}"
 BUILD_DIR_P4C="${BUILD_DIR_P4C:-$NET_SRC_DIR/build-p4c}"
 
-LIBYANG_REPO="${LIBYANG_REPO:-https://github.com/CESNET/libyang.git}"
 SYSREPO_REPO="${SYSREPO_REPO:-https://github.com/sysrepo/sysrepo.git}"
 LIBNETCONF2_REPO="${LIBNETCONF2_REPO:-https://github.com/CESNET/libnetconf2.git}"
 NETOPEER2_REPO="${NETOPEER2_REPO:-https://github.com/CESNET/Netopeer2.git}"
@@ -125,16 +166,15 @@ PI_REPO="${PI_REPO:-https://github.com/p4lang/PI.git}"
 BMV2_REPO="${BMV2_REPO:-https://github.com/p4lang/behavioral-model.git}"
 P4C_REPO="${P4C_REPO:-https://github.com/p4lang/p4c.git}"
 
-# Commits que já foram usados no ambiente de reprodutibilidade anterior.
-PI_REF="${PI_REF:-5689c91a8a7423781267b27d8b166c49a53904ff}"
-BMV2_REF="${BMV2_REF:-e6f4501a63ccb040d21a6d0c4dc333c593c77677}"
-P4C_REF="${P4C_REF:-8c4420e21f38554e568c2028db9254e71cf9d87f}"
-
-# libyang/sysrepo/libnetconf2/Netopeer2 podem ser pinados externamente, se desejado.
-LIBYANG_REF="${LIBYANG_REF:-master}"
-SYSREPO_REF="${SYSREPO_REF:-master}"
-LIBNETCONF2_REF="${LIBNETCONF2_REF:-master}"
-NETOPEER2_REF="${NETOPEER2_REF:-master}"
+# Canonical immutable revisions. Environment overrides are accepted for
+# controlled compatibility experiments, but every effective value is recorded
+# by the provenance collector.
+PI_REF="${PI_REF:-$L2I_PI_REF}"
+BMV2_REF="${BMV2_REF:-$L2I_BMV2_REF}"
+P4C_REF="${P4C_REF:-$L2I_P4C_REF}"
+SYSREPO_REF="${SYSREPO_REF:-$L2I_SYSREPO_REF}"
+LIBNETCONF2_REF="${LIBNETCONF2_REF:-$L2I_LIBNETCONF2_REF}"
+NETOPEER2_REF="${NETOPEER2_REF:-$L2I_NETOPEER2_REF}"
 
 export DEBIAN_FRONTEND=noninteractive
 export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
@@ -175,13 +215,20 @@ clone_or_update_git() {
 
   run git -C "$repo_dir" fetch --all --tags --prune
 
-  if git -C "$repo_dir" rev-parse --verify "$repo_ref" >/dev/null 2>&1; then
-    run git -C "$repo_dir" checkout "$repo_ref"
-  else
-    run git -C "$repo_dir" checkout "origin/$repo_ref"
+  if ! git -C "$repo_dir" cat-file -e "${repo_ref}^{commit}" 2>/dev/null; then
+    err "Revisão imutável não encontrada em $repo_dir: $repo_ref"
+    exit 1
   fi
 
+  run git -C "$repo_dir" checkout --detach "$repo_ref"
   run git -C "$repo_dir" submodule update --init --recursive
+
+  local effective_ref
+  effective_ref="$(git -C "$repo_dir" rev-parse HEAD)"
+  [[ "$effective_ref" == "$repo_ref" ]] || {
+    err "Revisão efetiva divergente em $repo_dir: esperado=$repo_ref obtido=$effective_ref"
+    exit 1
+  }
 }
 
 cmake_build_install() {
@@ -244,6 +291,7 @@ apt_base() {
     openssh-client openssl \
     protobuf-compiler protobuf-compiler-grpc \
     libprotobuf-dev libprotobuf-c-dev protobuf-c-compiler \
+    libyang2-dev libyang2-tools \
     libssh-dev libssl-dev libcurl4-openssl-dev libpcre2-dev \
     libavl-dev libev-dev libsqlite3-dev libsystemd-dev \
     libboost-dev libboost-system-dev libboost-filesystem-dev \
@@ -287,26 +335,27 @@ PY
 # -------------------------------
 # builds por código-fonte
 # -------------------------------
-build_libyang() {
-  local src="$NET_SRC_DIR/libyang"
+verify_system_dependency_versions() {
+  local libyang_version protobuf_version grpc_version
 
-  if pkg-config --exists libyang; then
-    local have_ver
-    have_ver="$(pkg-config --modversion libyang 2>/dev/null || true)"
-    if [[ -n "$have_ver" ]]; then
-      info "libyang já encontrado via pkg-config (versão $have_ver)."
-      return 0
-    fi
-  fi
+  libyang_version="$(pkg-config --modversion libyang 2>/dev/null || true)"
+  protobuf_version="$(protoc --version 2>/dev/null | awk '{print $2}' || true)"
+  grpc_version="$(dpkg-query -W -f='${Version}' libgrpc-dev 2>/dev/null | sed 's/-.*//' || true)"
 
-  clone_or_update_git "$LIBYANG_REPO" "$src" "$LIBYANG_REF"
-  cmake_build_install "$src" "$BUILD_DIR_LIBYANG"     -DCMAKE_BUILD_TYPE=Release
-
-  pkg-config --exists libyang || {
-    err "libyang não ficou visível via pkg-config após a instalação."
-    err "Verifique PKG_CONFIG_PATH=/usr/local/lib/pkgconfig e os arquivos instalados em /usr/local."
+  [[ "$libyang_version" == "$L2I_LIBYANG_UPSTREAM_VERSION" ]] || {
+    err "libyang incompatível: esperado=$L2I_LIBYANG_UPSTREAM_VERSION obtido=${libyang_version:-ausente}"
     exit 1
   }
+  [[ "$protobuf_version" == "$L2I_PROTOBUF_UPSTREAM_VERSION" ]] || {
+    err "Protocol Buffers incompatível: esperado=$L2I_PROTOBUF_UPSTREAM_VERSION obtido=${protobuf_version:-ausente}"
+    exit 1
+  }
+  [[ "$grpc_version" == "$L2I_GRPC_UPSTREAM_VERSION" ]] || {
+    err "gRPC incompatível: esperado=$L2I_GRPC_UPSTREAM_VERSION obtido=${grpc_version:-ausente}"
+    exit 1
+  }
+
+  info "Dependências de sistema verificadas: libyang=$libyang_version protobuf=$protobuf_version grpc=$grpc_version"
 }
 
 build_sysrepo() {
@@ -335,12 +384,13 @@ build_netopeer2() {
 }
 
 build_netconf() {
-  if command -v netopeer2-server >/dev/null 2>&1 && command -v sysrepoctl >/dev/null 2>&1 && pkg-config --exists libyang; then
+  verify_system_dependency_versions
+
+  if command -v netopeer2-server >/dev/null 2>&1 && command -v sysrepoctl >/dev/null 2>&1; then
     info "Stack NETCONF já presente — pulando build."
     return 0
   fi
 
-  build_libyang
   build_sysrepo
   build_libnetconf2
   build_netopeer2
@@ -724,6 +774,10 @@ verify_services() {
   info "VERIFY_SERVICES_OK"
 }
 
+collect_provenance() {
+  run "$REPO_DIR/scripts/collect_provenance.sh" "${PROVENANCE_FILE:-$RESULTS_DIR/provenance/environment-provenance.txt}"
+}
+
 # -------------------------------
 # fluxo completo
 # -------------------------------
@@ -739,6 +793,7 @@ all() {
 
   apt_base
   assert_system_tools
+  verify_system_dependency_versions
   ensure_dirs
   python_env
   build_p4
@@ -747,6 +802,7 @@ all() {
   start_real_services
   verify_python_imports
   verify_services
+  collect_provenance
 
   info "Bootstrap finalizado."
 }
@@ -765,6 +821,8 @@ Ações principais:
   start_real_services
   verify_python_imports
   verify_services
+  verify_system_dependency_versions
+  collect_provenance
   run_s1_real
   run_s1_mock
   run_s2_real
@@ -782,6 +840,7 @@ Ações internas úteis:
 
 Variáveis úteis:
   L2I_REPO_DIR=$HOME/l2i-dsl
+  DEPENDENCY_LOCK=$HOME/l2i-dsl/config/dependencies.env
   NET_SRC_DIR=$HOME/l2i-src
   DEV_DIR=$HOME/l2i-dev
   VENV_DIR=$HOME/l2i-dev/venv
@@ -803,7 +862,6 @@ case "${1:-}" in
   apt_base) apt_base ;;
   python_env) python_env ;;
   build_p4) build_p4 ;;
-  build_libyang) build_libyang ;;
   build_netconf) build_netconf ;;
   build_sysrepo) build_sysrepo ;;
   build_libnetconf2) build_libnetconf2 ;;
@@ -816,6 +874,8 @@ case "${1:-}" in
   push_p4_pipeline) push_p4_pipeline ;;
   verify_python_imports) verify_python_imports ;;
   verify_services) verify_services ;;
+  verify_system_dependency_versions) verify_system_dependency_versions ;;
+  collect_provenance) collect_provenance ;;
   run_s1_real) run_s1_real ;;
   run_s1_mock) run_s1_mock ;;
   run_s2_real) run_s2_real ;;

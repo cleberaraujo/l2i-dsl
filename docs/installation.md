@@ -34,7 +34,7 @@ O script `setup_all.sh` executa automaticamente:
 * criação do ambiente virtual (`~/l2i-dev/venv`)
 * instalação de dependências Python
 * compilação do stack P4 (PI, bmv2, p4c)
-* compilação do stack NETCONF (libyang, sysrepo, libnetconf2, Netopeer2)
+* instalação do libyang fornecido pelo Ubuntu e compilação de sysrepo, libnetconf2 e Netopeer2 em revisões imutáveis
 * configuração do usuário `netconf`
 * configuração de autenticação SSH
 * instalação do modelo YANG `l2i-qos`
@@ -221,21 +221,11 @@ sudo ldconfig
 
 ## 3.7 Stack NETCONF
 
-Executado em `~/l2i-src`:
-
-### libyang
+O libyang é instalado a partir dos pacotes oficiais do Ubuntu 24.04. As demais dependências NETCONF são compiladas em `~/l2i-src` a partir das revisões imutáveis registradas em `config/dependencies.env`.
 
 ```bash
-git clone https://github.com/CESNET/libyang.git
-cd libyang
-mkdir build && cd build
-cmake ..
-make -j2
-sudo make install
-sudo ldconfig
+sudo apt install -y libyang2-dev libyang2-tools
 ```
-
----
 
 ### sysrepo
 
@@ -362,3 +352,13 @@ Este processo garante:
 ---
 
 👉 Próximo passo: [docs/minimal_test.md](minimal_test.md)
+
+---
+
+# Proveniência do ambiente
+
+As revisões canônicas e a política de proveniência são descritas em [dependency-provenance.md](dependency-provenance.md). Depois da instalação, gere o registro do ambiente com:
+
+```bash
+./scripts/collect_provenance.sh
+```

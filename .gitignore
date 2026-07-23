@@ -39,3 +39,6 @@ results/S1/
 results/S2/
 results/runs/
 results/tmp/
+
+# Generated environment provenance
+results/provenance/
