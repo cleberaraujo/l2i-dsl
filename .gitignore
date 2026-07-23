@@ -1,0 +1,41 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Python environments and packaging outputs
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# Editors and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
+
+# Logs and transient runtime files
+*.log
+*.pid
+*.tmp
+
+# Private keys and generated authentication material
+*.key
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+l2i-netconf-user-auth.xml
+
+# Generated experiment run directories
+results/S1/
+results/S2/
+results/runs/
+results/tmp/
