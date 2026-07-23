@@ -221,11 +221,20 @@ cd ~/l2i-src
 git clone https://github.com/p4lang/p4c.git
 cd p4c
 mkdir build && cd build
-cmake ..
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_GTESTS=OFF \
+  -DENABLE_P4TEST=OFF \
+  -DENABLE_BMV2=ON \
+  -DENABLE_EBPF=OFF
 make -j2
 sudo make install
 sudo ldconfig
 ```
+
+The canonical experimental profile does not build the eBPF backend. Domain C
+uses BMv2 and P4Runtime, so libbpf, `libelf-dev`, Clang, and LLVM are not runtime
+requirements of the evaluated path.
 ---
 
 ## 3.7 Stack NETCONF

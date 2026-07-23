@@ -116,6 +116,14 @@ require_dependency_lock() {
       exit 1
     }
   done
+
+  for name in L2I_P4C_ENABLE_BMV2 L2I_P4C_ENABLE_EBPF; do
+    value="${!name:-}"
+    [[ "$value" == "ON" || "$value" == "OFF" ]] || {
+      err "Perfil p4c inválido em $DEPENDENCY_LOCK: $name=${value:-<vazio>}"
+      exit 1
+    }
+  done
 }
 
 require_dependency_lock
@@ -173,6 +181,9 @@ P4C_REPO="${P4C_REPO:-https://github.com/p4lang/p4c.git}"
 PI_REF="${PI_REF:-$L2I_PI_REF}"
 BMV2_REF="${BMV2_REF:-$L2I_BMV2_REF}"
 P4C_REF="${P4C_REF:-$L2I_P4C_REF}"
+P4C_ENABLE_BMV2="${P4C_ENABLE_BMV2:-$L2I_P4C_ENABLE_BMV2}"
+P4C_ENABLE_EBPF="${P4C_ENABLE_EBPF:-$L2I_P4C_ENABLE_EBPF}"
+P4C_FORCE_REBUILD="${P4C_FORCE_REBUILD:-0}"
 SYSREPO_REF="${SYSREPO_REF:-$L2I_SYSREPO_REF}"
 LIBNETCONF2_REF="${LIBNETCONF2_REF:-$L2I_LIBNETCONF2_REF}"
 NETOPEER2_REF="${NETOPEER2_REF:-$L2I_NETOPEER2_REF}"
@@ -492,11 +503,30 @@ build_bmv2() {
   autotools_build_install "$src" --with-pi
 }
 
+p4c_profile_matches() {
+  [[ -f "$BUILD_DIR_P4C/CMakeCache.txt" ]] \
+    && grep -Fqx "ENABLE_BMV2:BOOL=$P4C_ENABLE_BMV2" "$BUILD_DIR_P4C/CMakeCache.txt" \
+    && grep -Fqx "ENABLE_EBPF:BOOL=$P4C_ENABLE_EBPF" "$BUILD_DIR_P4C/CMakeCache.txt"
+}
+
 build_p4c() {
   local src="$NET_SRC_DIR/p4c"
-  if command -v p4c >/dev/null 2>&1; then
-    info "p4c já encontrado — pulando build do p4c."
+
+  [[ "$P4C_FORCE_REBUILD" == "0" || "$P4C_FORCE_REBUILD" == "1" ]] || {
+    err "P4C_FORCE_REBUILD deve ser 0 ou 1: $P4C_FORCE_REBUILD"
+    exit 1
+  }
+
+  if command -v p4c >/dev/null 2>&1 \
+      && [[ "$P4C_FORCE_REBUILD" != "1" ]] \
+      && p4c_profile_matches; then
+    info "p4c já encontrado com o perfil canônico — pulando build."
+    info "Use P4C_FORCE_REBUILD=1 para forçar a reconstrução."
     return 0
+  fi
+
+  if command -v p4c >/dev/null 2>&1 && ! p4c_profile_matches; then
+    warn "p4c instalado com perfil divergente; reconfigurando o build canônico."
   fi
 
   clone_or_update_git "$P4C_REPO" "$src" "$P4C_REF"
@@ -504,12 +534,27 @@ build_p4c() {
     -DCMAKE_BUILD_TYPE=Release \
     -DENABLE_GTESTS=OFF \
     -DENABLE_P4TEST=OFF \
-    -DENABLE_BMV2=ON
+    -DENABLE_BMV2="$P4C_ENABLE_BMV2" \
+    -DENABLE_EBPF="$P4C_ENABLE_EBPF"
+
+  if [[ "$DRY_RUN" != "1" ]]; then
+    grep -Fqx "ENABLE_BMV2:BOOL=$P4C_ENABLE_BMV2" "$BUILD_DIR_P4C/CMakeCache.txt" || {
+      err "Perfil p4c divergente: ENABLE_BMV2"
+      exit 1
+    }
+    grep -Fqx "ENABLE_EBPF:BOOL=$P4C_ENABLE_EBPF" "$BUILD_DIR_P4C/CMakeCache.txt" || {
+      err "Perfil p4c divergente: ENABLE_EBPF"
+      exit 1
+    }
+  fi
 }
 
 build_p4() {
-  if command -v simple_switch_grpc >/dev/null 2>&1 && command -v p4c >/dev/null 2>&1; then
-    info "Stack P4 já instalada — pulando build."
+  if command -v simple_switch_grpc >/dev/null 2>&1 \
+      && command -v p4c >/dev/null 2>&1 \
+      && p4c_profile_matches \
+      && [[ "$P4C_FORCE_REBUILD" != "1" ]]; then
+    info "Stack P4 já instalada com o perfil canônico — pulando build."
     return 0
   fi
 

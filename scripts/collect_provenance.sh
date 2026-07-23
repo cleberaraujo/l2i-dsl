@@ -6,6 +6,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 REPO_DIR="$(realpath "$SCRIPT_DIR/..")"
 NET_SRC_DIR="${NET_SRC_DIR:-$HOME/l2i-src}"
 VENV_DIR="${VENV_DIR:-$HOME/l2i-dev/venv}"
+BUILD_DIR_P4C="${BUILD_DIR_P4C:-$NET_SRC_DIR/build-p4c}"
 PYTHON_REQUIREMENTS_LOCK="${PYTHON_REQUIREMENTS_LOCK:-$REPO_DIR/requirements/python-runtime.lock}"
 OUTPUT_FILE="${1:-$REPO_DIR/results/provenance/environment-provenance.txt}"
 
@@ -86,6 +87,15 @@ print_git_state() {
   print_git_state "sysrepo" "$NET_SRC_DIR/sysrepo"
   print_git_state "libnetconf2" "$NET_SRC_DIR/libnetconf2"
   print_git_state "Netopeer2" "$NET_SRC_DIR/Netopeer2"
+
+  echo "=== P4C BUILD PROFILE ==="
+  if [[ -f "$BUILD_DIR_P4C/CMakeCache.txt" ]]; then
+    echo "cmake_cache=$BUILD_DIR_P4C/CMakeCache.txt"
+    grep -E '^(ENABLE_BMV2|ENABLE_EBPF):BOOL=' "$BUILD_DIR_P4C/CMakeCache.txt" || true
+  else
+    echo "state=not-configured"
+    echo "expected_path=$BUILD_DIR_P4C/CMakeCache.txt"
+  fi
 
   echo "=== SYSTEM TOOL VERSIONS ==="
   printf 'python3='; python3 --version 2>&1 || true

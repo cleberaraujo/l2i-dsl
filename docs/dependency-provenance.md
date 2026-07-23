@@ -45,3 +45,21 @@ utilities are not included in this runtime lock because NumPy and Matplotlib
 were not present in the preserved VM environment. Their dependency contract
 must be established separately when the definitive analysis pipeline is
 consolidated.
+
+
+## Canonical p4c backend profile
+
+The evaluated Domain C uses the BMv2 backend and emits P4Runtime artifacts.
+The canonical build therefore enables `ENABLE_BMV2` and explicitly disables
+`ENABLE_EBPF`. The eBPF backend is outside the evaluated scope and otherwise
+triggers optional libbpf and LLVM configuration whose failure does not prevent
+the BMv2 compiler from being installed. The selected profile is stored in
+`config/dependencies.env`, asserted against the p4c `CMakeCache.txt`, and
+recorded by the provenance collector.
+
+A previously configured p4c tree can be rebuilt under the canonical profile
+with:
+
+```bash
+P4C_FORCE_REBUILD=1 ./setup_all.sh build_p4c
+```
