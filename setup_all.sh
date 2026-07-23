@@ -281,9 +281,26 @@ assert_repo_files() {
 # -------------------------------
 # pacotes base
 # -------------------------------
+preseed_iperf3() {
+  local selection="iperf3 iperf3/start_daemon boolean false"
+
+  info "Configurando iperf3 para não iniciar automaticamente como daemon."
+  if [[ "$DRY_RUN" == "1" ]]; then
+    info "printf '%s\n' '$selection' | sudo debconf-set-selections"
+    return 0
+  fi
+
+  command -v debconf-set-selections >/dev/null 2>&1 || {
+    err "debconf-set-selections não está disponível."
+    exit 1
+  }
+  printf '%s\n' "$selection" | sudo debconf-set-selections
+}
+
 apt_base() {
-  run sudo apt update
-  run sudo apt install -y \
+  preseed_iperf3
+  run sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+  run sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     ca-certificates curl git rsync \
     build-essential cmake ninja-build pkg-config \
     autoconf automake libtool libtool-bin \

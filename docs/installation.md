@@ -41,6 +41,10 @@ O script `setup_all.sh` executa automaticamente:
 * aplicação de política NACM permissiva
 * validação do ambiente
 
+A instalação de pacotes é executada sem interação. O `iperf3` é instalado com
+a inicialização automática como daemon desabilitada, pois os cenários iniciam
+e encerram explicitamente seus próprios processos de medição.
+
 ---
 
 ## 🔁 Reexecução segura
@@ -111,8 +115,12 @@ cd l2i-dsl
 ## 3.2 Dependências do sistema
 
 ```bash id="inst_manual02"
-sudo apt update
-sudo apt install -y \
+printf '%s\n' \
+  'iperf3 iperf3/start_daemon boolean false' \
+  | sudo debconf-set-selections
+
+sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3 python3-venv python3-pip \
   git curl build-essential cmake pkg-config \
   iproute2 iputils-ping net-tools iperf3 fping graphviz \
