@@ -146,6 +146,7 @@ NETCONF_KEY="${NETCONF_KEY:-$HOME_DIR/.ssh/l2i_netconf_key}"
 
 PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
 PIP_BIN="${PIP_BIN:-$VENV_DIR/bin/pip}"
+PYTHON_REQUIREMENTS_LOCK="${PYTHON_REQUIREMENTS_LOCK:-$REPO_DIR/requirements/python-runtime.lock}"
 
 NETCONF_PORT="${NETCONF_PORT:-830}"
 P4_PORT="${P4_PORT:-9559}"
@@ -306,6 +307,47 @@ apt_base() {
 # -------------------------------
 # python / venv
 # -------------------------------
+verify_python_lock() {
+  [[ -f "$PYTHON_REQUIREMENTS_LOCK" ]] || {
+    err "Lock Python ausente: $PYTHON_REQUIREMENTS_LOCK"
+    exit 1
+  }
+
+  run "$PYTHON_BIN" - "$PYTHON_REQUIREMENTS_LOCK" <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+import sys
+
+lock = Path(sys.argv[1])
+errors = []
+checked = 0
+
+for raw_line in lock.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if "==" not in line:
+        errors.append(f"unsupported lock entry: {line}")
+        continue
+    name, expected = line.split("==", 1)
+    try:
+        installed = version(name)
+    except PackageNotFoundError:
+        errors.append(f"missing: {name}=={expected}")
+        continue
+    checked += 1
+    if installed != expected:
+        errors.append(
+            f"version mismatch: {name} expected={expected} installed={installed}"
+        )
+
+if errors:
+    raise SystemExit("\n".join(errors))
+
+print(f"PYTHON_LOCK_OK packages={checked}")
+PY
+}
+
 python_env() {
   ensure_dirs
 
@@ -318,15 +360,24 @@ python_env() {
     run python3 -m venv "$VENV_DIR"
   fi
 
-  run "$PIP_BIN" install --upgrade pip setuptools wheel
+  [[ -f "$PYTHON_REQUIREMENTS_LOCK" ]] || {
+    err "Lock Python ausente: $PYTHON_REQUIREMENTS_LOCK"
+    exit 1
+  }
+
   run "$PIP_BIN" install \
-    jsonschema pyyaml \
-    grpcio protobuf==3.20.3 \
-    ncclient cryptography paramiko \
-    p4runtime-shell
+    --disable-pip-version-check \
+    --requirement "$PYTHON_REQUIREMENTS_LOCK"
+  run "$PIP_BIN" check
+  verify_python_lock
 
   run "$PYTHON_BIN" - <<'PY'
-import jsonschema, yaml, grpc, ncclient
+import cryptography
+import grpc
+import ncclient
+import paramiko
+import yaml
+from p4.v1 import p4runtime_pb2
 from p4runtime_sh.shell import P4RuntimeClient
 print("PYTHON_ENV_OK")
 PY
@@ -761,8 +812,15 @@ run_s2_real() {
 # verificações rápidas
 # -------------------------------
 verify_python_imports() {
+  verify_python_lock
+  run "$PIP_BIN" check
   run "$PYTHON_BIN" - <<'PY'
+import cryptography
+import grpc
 import ncclient
+import paramiko
+import yaml
+from p4.v1 import p4runtime_pb2
 from p4runtime_sh.shell import P4RuntimeClient
 print("VERIFY_PYTHON_OK")
 PY
@@ -844,6 +902,7 @@ Variáveis úteis:
   NET_SRC_DIR=$HOME/l2i-src
   DEV_DIR=$HOME/l2i-dev
   VENV_DIR=$HOME/l2i-dev/venv
+  PYTHON_REQUIREMENTS_LOCK=$HOME/l2i-dsl/requirements/python-runtime.lock
   MAKE_JOBS=$(nproc 2>/dev/null || echo 2)
   NETCONF_USER=netconf
   NETCONF_KEY=$HOME/.ssh/l2i_netconf_key

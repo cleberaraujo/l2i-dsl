@@ -26,3 +26,22 @@ relevant Debian packages, tool versions, Python packages, and network state.
 The report is evidence of the environment that executed an experiment. It is
 not a substitute for the dependency lock, and the dependency lock is not a
 substitute for the report. Both are required for a defensible release.
+
+## Python dependency contract
+
+The direct Python dependency contract is documented in
+`requirements/python-runtime.in`. The complete environment recovered from the
+preserved SBRC 2026 VM is fixed in `requirements/python-runtime.lock` and is the
+only file consumed by `setup_all.sh python_env`.
+
+The installer does not perform an unbounded upgrade of pip, setuptools, or
+wheel. It installs the exact locked distributions, runs `pip check`, verifies
+every locked version through Python package metadata, and then executes runtime
+import checks. The provenance collector records both the lock-file hash and the
+resolved environment reported by `pip freeze --all`.
+
+The lock covers the framework runtime and the P4Runtime/NETCONF clients. Plotting
+utilities are not included in this runtime lock because NumPy and Matplotlib
+were not present in the preserved VM environment. Their dependency contract
+must be established separately when the definitive analysis pipeline is
+consolidated.

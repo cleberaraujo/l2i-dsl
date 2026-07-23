@@ -32,7 +32,7 @@ O script `setup_all.sh` executa automaticamente:
 
 * instalação de dependências do sistema
 * criação do ambiente virtual (`~/l2i-dev/venv`)
-* instalação de dependências Python
+* instalação das dependências Python fixadas em `requirements/python-runtime.lock`
 * compilação do stack P4 (PI, bmv2, p4c)
 * instalação do libyang fornecido pelo Ubuntu e compilação de sysrepo, libnetconf2 e Netopeer2 em revisões imutáveis
 * configuração do usuário `netconf`
@@ -129,10 +129,11 @@ sudo apt install -y \
 python3 -m venv ~/l2i-dev/venv
 source ~/l2i-dev/venv/bin/activate
 
-pip install --upgrade pip setuptools wheel
-pip install jsonschema pyyaml grpcio protobuf==3.20.3 \
-            ncclient cryptography paramiko \
-            grpcio-tools p4runtime-shell
+pip install \
+  --disable-pip-version-check \
+  --requirement requirements/python-runtime.lock
+pip check
+./setup_all.sh verify_python_imports
 ```
 ---
 

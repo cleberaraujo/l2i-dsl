@@ -6,6 +6,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 REPO_DIR="$(realpath "$SCRIPT_DIR/..")"
 NET_SRC_DIR="${NET_SRC_DIR:-$HOME/l2i-src}"
 VENV_DIR="${VENV_DIR:-$HOME/l2i-dev/venv}"
+PYTHON_REQUIREMENTS_LOCK="${PYTHON_REQUIREMENTS_LOCK:-$REPO_DIR/requirements/python-runtime.lock}"
 OUTPUT_FILE="${1:-$REPO_DIR/results/provenance/environment-provenance.txt}"
 
 mkdir -p "$(dirname "$OUTPUT_FILE")"
@@ -57,10 +58,21 @@ print_git_state() {
   echo
   echo "=== DEPENDENCY LOCK ==="
   if [[ -f "$REPO_DIR/config/dependencies.env" ]]; then
-    echo "sha256=$(sha256sum "$REPO_DIR/config/dependencies.env" | awk '{print $1}')"
+    echo "source_lock_sha256=$(sha256sum "$REPO_DIR/config/dependencies.env" | awk '{print $1}')"
     cat "$REPO_DIR/config/dependencies.env"
   else
     echo "state=missing"
+  fi
+
+  echo
+  echo "=== PYTHON DEPENDENCY LOCK ==="
+  if [[ -f "$PYTHON_REQUIREMENTS_LOCK" ]]; then
+    echo "path=$PYTHON_REQUIREMENTS_LOCK"
+    echo "python_lock_sha256=$(sha256sum "$PYTHON_REQUIREMENTS_LOCK" | awk '{print $1}')"
+    cat "$PYTHON_REQUIREMENTS_LOCK"
+  else
+    echo "state=missing"
+    echo "expected_path=$PYTHON_REQUIREMENTS_LOCK"
   fi
 
   echo

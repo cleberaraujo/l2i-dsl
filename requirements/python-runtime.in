@@ -1,0 +1,14 @@
+# Direct Python dependencies for the L2I runtime.
+#
+# Versions were recovered from the preserved SBRC 2026 development
+# environment. This file documents the direct dependency contract. The
+# complete reproducible installation is defined by python-runtime.lock.
+
+cryptography==46.0.4
+grpcio==1.76.0
+ncclient==0.7.0
+p4runtime==1.4.1
+p4runtime-shell==0.0.6
+paramiko==4.0.0
+protobuf==3.20.3
+PyYAML==6.0.3
