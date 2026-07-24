@@ -1013,6 +1013,7 @@ run_python_module_as_root() {
   local module="$1"
   shift
   sudo -E \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
     PATH="$VENV_DIR/bin:$PATH" \
     "$PYTHON_BIN" -m "$module" "$@"
@@ -1080,7 +1081,10 @@ run_s2_real() {
       --mode "${S2_MODE:-adapt}" \
       --backend real \
       --phase-splits "${S2_PHASE1:-3}" "${S2_PHASE2:-6}" \
-      --event-name join \
+      --event-name "${S2_EVENT_NAME:-join}" \
+      --mcast-group-id "${S2_MCAST_GROUP_ID:-1}" \
+      --mcast-dst "${S2_MCAST_DST:-239.1.1.1}" \
+      --mcast-ports "${S2_MCAST_PORT0:-0}" "${S2_MCAST_PORT1:-1}" \
       --rtt-interval-ms "${S2_RTT_INTERVAL_MS:-50}" \
       --recovery-bin-ms "${S2_RECOVERY_BIN_MS:-500}" \
       --stable-k-bins "${S2_STABLE_K_BINS:-3}"

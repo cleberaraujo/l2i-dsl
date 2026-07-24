@@ -28,13 +28,18 @@ Artefatos gerados (sem remover nada do que já existe):
 Domínios:
 - A: Linux tc/htb (local, netns do host)
 - B: NETCONF (ncclient)
-- C: P4Runtime (gRPC)
+- C: P4Runtime (gRPC), com programação de mcast_table + PRE no evento
 
 Obs. sobre conformidade:
 - Conformidade é avaliada por fase a partir de duas dimensões:
   (i) RTT (percentil P99) <= limite e (ii) delivery_ratio estimado >= limite.
 - O limite de RTT por padrão vem do spec (requirements.latency.max_ms, ou latency.max_ms no spec S2).
 - O limite de delivery_ratio padrão é 0.99 (configurável).
+
+Escopo da validação multicast:
+- o evento materializa e confirma, por readback P4Runtime, a regra de multicast e o grupo PRE;
+- o tráfego de suporte (TCP unicast e ICMP) permanece sobre a bridge do testbed;
+- portanto, este cenário valida o plano de controle multicast, não o encaminhamento multicast ponta a ponta pelo BMv2.
 
 Compatibilidade:
 - Este arquivo foi feito para ser substituído integralmente no repositório.
@@ -45,9 +50,11 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import ipaddress
 import json
 import math
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -477,81 +484,8 @@ def parse_iperf3_mbps(path: Path) -> float | None:
         return None
 
 
-# ---------------- TC (Domínio A) ----------------
-
-def tc_env_setup(ns: str, dev: str, bw_mbps: float) -> Dict[str, Any]:
-    """
-    Configuração do AMBIENTE (operador/admin) no Domínio A:
-    - limita link via HTB em um classid "1:1" com rate=ceil=bw_mbps.
-    - NÃO instala filtro/priority class (isso é papel da adaptação).
-    """
-    cmds: List[List[str]] = []
-
-    def _r(c: List[str], check: bool = True):
-        cmds.append(c)
-        run(c, check=check, ns=ns)
-
-    bw = max(1, int(bw_mbps))
-
-    _r(["tc", "qdisc", "del", "dev", dev, "root"], check=False)
-    _r(["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb"])
-    _r(["tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb",
-        "rate", f"{bw}mbit", "ceil", f"{bw}mbit"])
-
-    qdisc = run(["tc", "qdisc", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-    classes = run(["tc", "class", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-    filters = run(["tc", "filter", "show", "dev", dev, "parent", "1:"], check=False, capture=True, ns=ns) or ""
-
-    return {
-        "commands": [" ".join(c) for c in cmds],
-        "readback": {"qdisc": qdisc.strip(), "class": classes.strip(), "filter": filters.strip()},
-    }
-
-
-def tc_apply_adaptation(ns: str, dev: str, intent: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Adaptação no Domínio A:
-    - cria uma classe adicional (ex.: 1:10) e instala filtro (ICMP) apontando para ela.
-    - usa intent[min_mbps/max_mbps] para rate/ceil (com arredondamento seguro).
-    - registra comandos e read-back.
-
-    Nota:
-    - este "evento" tende a causar alguma perturbação (replace/insert de classes/filtros),
-      permitindo observar deltas baseline vs adapt em RTT/throughput, sem artificialidade.
-    """
-    cmds: List[List[str]] = []
-    prio_cls = "10"  # classid 1:10
-
-    def _r(c: List[str], check: bool = True):
-        cmds.append(c)
-        run(c, check=check, ns=ns)
-
-    min_mbps = max(1, int(float(intent.get("min_mbps", 1))))
-    max_mbps = max(min_mbps, int(float(intent.get("max_mbps", min_mbps))))
-
-    # remove filtro anterior (se existir) para evitar duplicação e ruído
-    _r(["tc", "filter", "del", "dev", dev, "parent", "1:", "protocol", "ip", "prio", "2"], check=False)
-
-    # garante classe de adaptação (1:10)
-    _r(["tc", "class", "del", "dev", dev, "classid", f"1:{prio_cls}"], check=False)
-    _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", f"1:{prio_cls}", "htb",
-        "rate", f"{min_mbps}mbit", "ceil", f"{max_mbps}mbit"])
-
-    # exemplo: trata ICMP como fluxo sensível (apenas para termos efeito mensurável)
-    _r(["tc", "filter", "add", "dev", dev, "protocol", "ip", "parent", "1:", "prio", "2",
-        "u32", "match", "ip", "protocol", "1", "0xff", "flowid", f"1:{prio_cls}"])
-
-    qdisc = run(["tc", "qdisc", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-    classes = run(["tc", "class", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-    filters = run(["tc", "filter", "show", "dev", dev, "parent", "1:"], check=False, capture=True, ns=ns) or ""
-
-    return {
-        "commands": [" ".join(c) for c in cmds],
-        "readback": {"qdisc": qdisc.strip(), "class": classes.strip(), "filter": filters.strip()},
-    }
-
-
 # ---------------- backends dinâmicos (A/B/C) ----------------
+
 
 from l2i.backends.router import get_backends  # noqa: E402
 
@@ -625,6 +559,121 @@ def _load_real_targets_yaml() -> Dict[str, Any]:
     if not ypath.exists():
         raise FileNotFoundError(f"Missing real-backends config: {ypath}")
     return yaml.safe_load(ypath.read_text(encoding="utf-8")) or {}
+
+
+def _program_p4_multicast(
+    *,
+    backend_mode: str,
+    target: Optional[Dict[str, Any]],
+    group_id: int,
+    dst_mcast: str,
+    ports: List[int],
+) -> Dict[str, Any]:
+    """Programa mcast_table + PRE com o programador P4Runtime validado.
+
+    O retorno é estruturado para compor ``dom_C.json`` e mantém a saída
+    textual integral como evidência de readback. No modo mock, apenas o plano
+    é registrado; nenhum estado é materializado.
+    """
+    target = dict(target or {})
+    address = str(target.get("address") or target.get("addr") or "127.0.0.1:9559")
+    device_id = int(target.get("device_id", 0))
+    outdir = str(target.get("outdir") or "/tmp/l2i_minimal")
+    timeout = float(target.get("timeout_s", target.get("timeout", 5.0)))
+
+    command = [
+        sys.executable,
+        str(ROOT / "scripts" / "p4_program_s2.py"),
+        "--addr", address,
+        "--device-id", str(device_id),
+        "--outdir", outdir,
+        "--mgrp", str(group_id),
+        "--dst-mcast", dst_mcast,
+        "--ports", *[str(port) for port in ports],
+        "--timeout", str(timeout),
+    ]
+
+    base: Dict[str, Any] = {
+        "backend": "p4runtime_multicast_programmer",
+        "operation": "apply_multicast",
+        "target": _mask_secret(target),
+        "installed_state": {
+            "table": "MyIngress.mcast_table",
+            "destination": f"{dst_mcast}/32",
+            "group_id": group_id,
+            "replica_ports": list(ports),
+        },
+        "command": command,
+        "simulated": backend_mode != "real",
+        "applied": False,
+        "exec": {"ok": False, "returncode": None, "stdout": "", "stderr": ""},
+        "readback_checks": {
+            "primary": False,
+            "pre_group": False,
+            "table_entry": False,
+            "functional": False,
+        },
+        "readback_dump": "",
+    }
+
+    if backend_mode != "real":
+        base["exec"] = {
+            "ok": True,
+            "returncode": None,
+            "stdout": "[mock] multicast P4Runtime plan not applied\n",
+            "stderr": "",
+        }
+        base["readback_dump"] = base["exec"]["stdout"]
+        return base
+
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=max(15.0, timeout * 4.0),
+            check=False,
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        dump = stdout + (("\n### STDERR\n" + stderr) if stderr else "")
+
+        checks = {
+            "primary": "P4_S2_IS_PRIMARY=True" in stdout,
+            "pre_group": "P4_S2_PRE_READBACK_OK=True" in stdout,
+            "table_entry": "P4_S2_TABLE_READBACK_OK=True" in stdout,
+            "functional": "P4_S2_PROGRAM_FUNCTIONAL_OK" in stdout,
+        }
+        ok = completed.returncode == 0 and all(checks.values())
+
+        base["exec"] = {
+            "ok": ok,
+            "returncode": int(completed.returncode),
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+        base["readback_checks"] = checks
+        base["readback_dump"] = dump
+        base["applied"] = ok
+        if not ok:
+            base["error"] = "P4 multicast programming or readback failed"
+        return base
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        base["exec"] = {
+            "ok": False,
+            "returncode": 124,
+            "stdout": str(stdout),
+            "stderr": str(stderr) or "P4 multicast programmer timed out",
+        }
+        base["readback_dump"] = str(stdout) + "\n" + str(stderr)
+        base["error"] = "P4 multicast programmer timed out"
+        return base
 
 
 # ---------------- Recovery ----------------
@@ -855,6 +904,12 @@ def main() -> None:
                     metavar=("PRE_END_S", "EVENT_END_S"),
                     help="splits em segundos: pre_event termina em PRE_END_S, evento termina em EVENT_END_S")
     ap.add_argument("--event-name", type=str, default="join", help="nome da fase de evento (ex.: join)")
+    ap.add_argument("--mcast-group-id", type=int, default=1,
+                    help="ID numérico do grupo PRE materializado no domínio C")
+    ap.add_argument("--mcast-dst", default="239.1.1.1",
+                    help="endereço IPv4 multicast materializado em MyIngress.mcast_table")
+    ap.add_argument("--mcast-ports", type=int, nargs="+", default=[0, 1],
+                    help="portas de réplica do grupo PRE")
 
     # RTT contínuo / recovery
     ap.add_argument("--rtt-interval-ms", type=int, default=50,
@@ -896,6 +951,28 @@ def main() -> None:
 
     intent = {"class": prio_class, "min_mbps": intent_min_mbps, "max_mbps": intent_max_mbps}
 
+    multicast_obj = (spec.get("multicast") or (spec.get("requirements", {}) or {}).get("multicast") or {})
+    multicast_enabled = bool(multicast_obj.get("enabled", False))
+    multicast_group_label = str(multicast_obj.get("group", "G1"))
+    multicast_tree = str(multicast_obj.get("tree", "SPT"))
+    multicast_group_id = int(args.mcast_group_id)
+    multicast_ports = list(dict.fromkeys(int(port) for port in args.mcast_ports))
+    multicast_dst = str(args.mcast_dst)
+
+    try:
+        multicast_ip = ipaddress.ip_address(multicast_dst)
+    except ValueError as exc:
+        raise ValueError(f"--mcast-dst is not a valid IP address: {multicast_dst}") from exc
+
+    if not isinstance(multicast_ip, ipaddress.IPv4Address) or not multicast_ip.is_multicast:
+        raise ValueError("--mcast-dst must be an IPv4 multicast address")
+    if not multicast_enabled:
+        raise ValueError("S2 requires multicast.enabled=true in the specification")
+    if not 1 <= multicast_group_id <= 0xFFFF:
+        raise ValueError("--mcast-group-id must be in the range 1..65535")
+    if not multicast_ports or any(port < 0 or port > 0xFFFFFFFF for port in multicast_ports):
+        raise ValueError("--mcast-ports must contain uint32 port identifiers")
+
     # limite RTT padrão vem do spec, se possível
     spec_rtt_limit = float(lat_obj.get("max_ms", 0)) if isinstance(lat_obj, dict) else 0.0
     rtt_limit = args.conformance_rtt_ms if args.conformance_rtt_ms >= 0 else spec_rtt_limit
@@ -919,8 +996,8 @@ def main() -> None:
 
     # --- backends e targets ---
     backends = get_backends(args.backend)
+    A_mod = backends["A"]
     B_mods = backends["B"]
-    C_mods = backends["C"]
 
     real_cfg = {}
     if args.backend == "real":
@@ -928,11 +1005,6 @@ def main() -> None:
 
     target_B = (real_cfg.get("B", {}) or {}).get("target") if args.backend == "real" else None
     target_C = (real_cfg.get("C", {}) or {}).get("target") if args.backend == "real" else None
-
-    # garante dst_ip no target_C (P4)
-    if isinstance(target_C, dict) and "dst_ip" not in target_C:
-        target_C = dict(target_C)
-        target_C["dst_ip"] = ip_C
 
     # --- artefatos ---
     ts = utc_ts()
@@ -982,6 +1054,23 @@ def main() -> None:
 
         # Intenção (camadas superiores)
         "intent": intent,
+        "multicast_intent": {
+            "enabled": multicast_enabled,
+            "group_label": multicast_group_label,
+            "tree": multicast_tree,
+            "materialization": {
+                "dst_ipv4": multicast_dst,
+                "group_id": multicast_group_id,
+                "replica_ports": multicast_ports,
+            },
+        },
+        "validation_scope": {
+            "multicast_control_plane_planned": args.mode == "adapt",
+            "multicast_control_plane_exercised": False,
+            "multicast_dataplane_exercised": False,
+            "support_traffic": "TCP unicast and ICMP over brs2",
+            "note": "mcast_table and PRE are programmed/read back during the event; support traffic does not traverse BMv2",
+        },
 
         "endpoints": {"source": ns_src, "B": {"ns": ns_B, "ip": ip_B}, "C": {"ns": ns_C, "ip": ip_C}},
         "targets": {
@@ -997,6 +1086,13 @@ def main() -> None:
         },
 
         "phase_plan": phase_plan,
+        "multicast_event": {
+            "name": str(args.event_name),
+            "action": "install_source_oriented_replication_state",
+            "started_ms": None,
+            "completed_ms": None,
+            "applied": False,
+        },
         "backend_apply": {"A": False, "B": False, "C": False},
 
         "artifacts": {
@@ -1043,10 +1139,17 @@ def main() -> None:
     }
 
     try:
-        env_ev = tc_env_setup(ns=ns_src, dev=f"{ns_src}-eth0", bw_mbps=args.bwA)
-        domA_info["applied_env"] = True
+        env_ev = A_mod.tc_env_setup(
+            ns=ns_src,
+            dev=f"{ns_src}-eth0",
+            bw_mbps=args.bwA,
+            dry_run=(args.backend != "real"),
+        )
+        domA_info["applied_env"] = args.backend == "real"
+        domA_info["simulated_env"] = args.backend != "real"
         domA_info["commands_env"] = env_ev["commands"]
         domA_info["readback_env"] = env_ev["readback"]
+        domA_info["backend_env_details"] = env_ev.get("backend_details")
     except Exception as e:
         domA_info["applied_env"] = False
         domA_info["env_error"] = str(e)
@@ -1097,21 +1200,30 @@ def main() -> None:
         "responses": [],
     }
     domC_info: Dict[str, Any] = {
-        "backend_chain": [getattr(m, "__name__", str(m)) for m in (C_mods if isinstance(C_mods, (list, tuple)) else [C_mods])],
+        "backend_chain": ["scripts.p4_program_s2"],
+        "operation": "apply_multicast",
         "applied": False,
         "env_params": {"bwC_mbps": args.bwC},
         "target": _mask_secret(target_C or {}) if target_C else None,
         "readback_dump": None,
         "responses": [],
+        "validation_scope": "multicast_control_plane",
     }
 
     if args.mode == "adapt":
         # A: aplica adaptação (intenção)
         try:
-            adapt_ev = tc_apply_adaptation(ns=ns_src, dev=f"{ns_src}-eth0", intent=intent)
-            domA_info["applied_adaptation"] = True
+            adapt_ev = A_mod.tc_apply_adaptation(
+                ns=ns_src,
+                dev=f"{ns_src}-eth0",
+                intent=intent,
+                dry_run=(args.backend != "real"),
+            )
+            domA_info["applied_adaptation"] = args.backend == "real"
+            domA_info["simulated_adaptation"] = args.backend != "real"
             domA_info["commands_adapt"] = adapt_ev["commands"]
             domA_info["readback_adapt"] = adapt_ev["readback"]
+            domA_info["backend_adaptation_details"] = adapt_ev.get("backend_details")
         except Exception as e:
             domA_info["applied_adaptation"] = False
             domA_info["adapt_error"] = str(e)
@@ -1135,31 +1247,39 @@ def main() -> None:
         if not dumped:
             netconf_dump_B.write_text("[no_dump] backend returned empty running_snapshot\n")
 
-        # C: backend(s)
+        # C: materializa o evento multicast (mcast_table + PRE) e confirma por readback.
+        s2["multicast_event"]["started_ms"] = tracker.now_ms()
         try:
-            aggC = _apply_backend_chain(C_mods, domain_ctx={"name": "C"}, intent=intent, target=target_C)
-            domC_info.update(aggC)
+            p4_result = _program_p4_multicast(
+                backend_mode=args.backend,
+                target=target_C,
+                group_id=multicast_group_id,
+                dst_mcast=multicast_dst,
+                ports=multicast_ports,
+            )
+            domC_info["applied"] = bool(p4_result.get("applied", False))
+            s2["multicast_event"]["applied"] = domC_info["applied"]
+            s2["validation_scope"]["multicast_control_plane_exercised"] = domC_info["applied"]
+            domC_info["responses"] = [{
+                "backend": "scripts.p4_program_s2",
+                "applied": domC_info["applied"],
+                "response": p4_result,
+            }]
+            domC_info["readback_dump"] = "[embedded]" if p4_result.get("readback_dump") else "[no_dump]"
+            p4_dump_C.write_text(str(p4_result.get("readback_dump") or "[no_dump] multicast programmer returned no output\n"))
         except Exception as e:
             domC_info["applied"] = False
-            domC_info["responses"] = [{"backend": "chain", "applied": False, "error": str(e)}]
-
-        # Dump P4 readback
-        dump_txt = None
-        for r in domC_info.get("responses", []):
-            info = r.get("response")
-            if isinstance(info, dict) and info.get("readback_dump"):
-                dump_txt = info.get("readback_dump")
-                break
-        if dump_txt:
-            domC_info["readback_dump"] = "[embedded]"
-            p4_dump_C.write_text(str(dump_txt))
-        else:
+            domC_info["responses"] = [{"backend": "scripts.p4_program_s2", "applied": False, "error": str(e)}]
             domC_info["readback_dump"] = "[no_dump]"
-            p4_dump_C.write_text("[no_dump] backend returned empty readback_dump\n")
+            p4_dump_C.write_text(f"[p4_multicast_error] {e}\n")
+        finally:
+            s2["multicast_event"]["completed_ms"] = tracker.now_ms()
     else:
-        # baseline: não aplica backends
+        # baseline: não aplica backends nem materializa o evento multicast.
+        s2["multicast_event"]["started_ms"] = tracker.now_ms()
+        s2["multicast_event"]["completed_ms"] = tracker.now_ms()
         netconf_dump_B.write_text("[baseline] no netconf changes applied\n")
-        p4_dump_C.write_text("[baseline] no p4 changes applied\n")
+        p4_dump_C.write_text("[baseline] no multicast P4Runtime state applied\n")
 
     # após o evento, aguarda o fim do experimento
     tracker.sleep_until_ms(int(phase_plan[-1]["end_ms"]))
