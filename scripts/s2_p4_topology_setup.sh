@@ -13,6 +13,12 @@ readonly -a NAMESPACES=(h1 h2 h3 h4)
 readonly -a ADDRESSES=(10.0.0.1 10.0.0.2 10.0.0.3 10.0.0.4)
 readonly -a P4_PORTS=(0 3 1 2)
 
+if ! command -v ethtool >/dev/null 2>&1; then
+  echo "[S2-P4-setup][erro] ethtool não está disponível." >&2
+  echo "[S2-P4-setup][erro] O dataplane emulado requer a desativação explícita de offloads." >&2
+  exit 1
+fi
+
 for port in 0 1 2 3; do
   for dev in "veth${port}" "veth${port}-peer"; do
     if ! ip link show "$dev" >/dev/null 2>&1; then
@@ -22,6 +28,41 @@ for port in 0 1 2 3; do
     fi
   done
 done
+
+disable_emulation_offloads() {
+  local ns="$1"
+  local dev="$2"
+  local feature
+  local state
+
+  # O BMv2 processa os bytes do quadro em espaço de usuário e não recebe os
+  # metadados de checksum parcial associados ao skb do Linux. Sem esta etapa,
+  # o quadro pode atravessar o switch com checksum UDP ainda não materializado
+  # e ser descartado pelo kernel receptor antes de alcançar o socket.
+  if ! ip netns exec "$ns" ethtool -K "$dev" tx off; then
+    echo "[S2-P4-setup][erro] Não foi possível desativar TX checksum em ${ns}:${dev}." >&2
+    exit 1
+  fi
+
+  # Evita que agregação/segmentação do host distorça o caminho por pacote. Nem
+  # todo driver veth expõe todas as opções; por isso, recursos não suportados
+  # são registrados como aviso, enquanto TX checksum é validado obrigatoriamente.
+  for feature in tso gso gro; do
+    if ! ip netns exec "$ns" ethtool -K "$dev" "$feature" off >/dev/null 2>&1; then
+      echo "[S2-P4-setup][aviso] ${feature} não pôde ser desativado em ${ns}:${dev}." >&2
+    fi
+  done
+
+  state="$(ip netns exec "$ns" ethtool -k "$dev")"
+
+  if ! grep -Eq '^tx-checksumming: off( \[fixed\])?$' <<<"$state"; then
+    echo "[S2-P4-setup][erro] TX checksum permanece ativo em ${ns}:${dev}." >&2
+    printf '%s\n' "$state" >&2
+    exit 1
+  fi
+
+  echo "S2_P4_TX_CHECKSUM_OFFLOAD_DISABLED=${ns}:${dev}"
+}
 
 create_attachment() {
   local ns="$1"
@@ -53,6 +94,8 @@ create_attachment() {
   ip -n "$ns" link set "$ns_end" name "${ns}-eth0"
   ip -n "$ns" link set "${ns}-eth0" up
   ip -n "$ns" addr add "${ipaddr}/24" dev "${ns}-eth0"
+
+  disable_emulation_offloads "$ns" "${ns}-eth0"
 }
 
 for i in "${!NAMESPACES[@]}"; do
@@ -70,6 +113,7 @@ for ns in "${NAMESPACES[@]}"; do
 done
 
 echo "S2_P4_TOPOLOGY_SETUP_OK"
+echo "S2_P4_OFFLOAD_CONFIGURATION_OK"
 echo "S2_P4_SOURCE_PORT=0"
 echo "S2_P4_RECEIVER_B_PORT=1"
 echo "S2_P4_RECEIVER_C_PORT=2"
