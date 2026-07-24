@@ -65,18 +65,31 @@ def sender(args: argparse.Namespace) -> int:
 
     filler = b"X" * (payload_bytes - HEADER.size)
     start_ns = time.monotonic_ns()
+    next_deadline_ns = start_ns
+    previous_send_ns: int | None = None
     sent = 0
     send_errors: list[str] = []
+    scheduler_lateness_ms: list[float] = []
+    inter_send_ms: list[float] = []
+    deadline_misses = 0
 
     for seq in range(total_packets):
-        deadline = start_ns + seq * interval_ns
         while True:
-            remaining = deadline - time.monotonic_ns()
+            remaining = next_deadline_ns - time.monotonic_ns()
             if remaining <= 0:
                 break
             time.sleep(min(remaining / 1_000_000_000.0, 0.002))
 
         send_ns = time.monotonic_ns()
+        lateness_ns = max(0, send_ns - next_deadline_ns)
+        scheduler_lateness_ms.append(lateness_ns / 1_000_000.0)
+
+        if lateness_ns >= interval_ns:
+            deadline_misses += 1
+
+        if previous_send_ns is not None:
+            inter_send_ms.append((send_ns - previous_send_ns) / 1_000_000.0)
+
         datagram = HEADER.pack(MAGIC, seq, send_ns, total_packets) + filler
         try:
             sock.sendto(datagram, (args.group, args.port))
@@ -84,8 +97,21 @@ def sender(args: argparse.Namespace) -> int:
         except OSError as exc:
             send_errors.append(f"seq={seq}: {exc}")
 
+        previous_send_ns = send_ns
+
+        # Never compensate a scheduler pause by transmitting overdue datagrams
+        # back-to-back. The requested rate is treated as an upper bound and the
+        # next packet is scheduled at least one full interval after this send.
+        next_deadline_ns = send_ns + interval_ns
+
     end_ns = time.monotonic_ns()
     sock.close()
+    elapsed_s = (end_ns - start_ns) / 1_000_000_000.0
+    actual_payload_mbps = (
+        (sent * payload_bytes * 8.0) / elapsed_s / 1_000_000.0
+        if elapsed_s > 0
+        else 0.0
+    )
 
     result = {
         "role": "sender",
@@ -100,11 +126,45 @@ def sender(args: argparse.Namespace) -> int:
         "send_errors": send_errors,
         "started_monotonic_ns": start_ns,
         "completed_monotonic_ns": end_ns,
-        "elapsed_s": (end_ns - start_ns) / 1_000_000_000.0,
+        "elapsed_s": elapsed_s,
+        "rate_payload_mbps_actual": actual_payload_mbps,
+        "pacing": {
+            "mode": "minimum_interval_no_catchup",
+            "interval_ns": interval_ns,
+            "deadline_misses": deadline_misses,
+            "scheduler_lateness_ms": {
+                "min": min(scheduler_lateness_ms) if scheduler_lateness_ms else None,
+                "mean": statistics.fmean(scheduler_lateness_ms) if scheduler_lateness_ms else None,
+                "p95": percentile(scheduler_lateness_ms, 0.95),
+                "p99": percentile(scheduler_lateness_ms, 0.99),
+                "max": max(scheduler_lateness_ms) if scheduler_lateness_ms else None,
+                "n": len(scheduler_lateness_ms),
+            },
+            "inter_send_ms": {
+                "min": min(inter_send_ms) if inter_send_ms else None,
+                "mean": statistics.fmean(inter_send_ms) if inter_send_ms else None,
+                "p50": percentile(inter_send_ms, 0.50),
+                "p95": percentile(inter_send_ms, 0.95),
+                "p99": percentile(inter_send_ms, 0.99),
+                "max": max(inter_send_ms) if inter_send_ms else None,
+                "n": len(inter_send_ms),
+            },
+        },
     }
     dump_json(Path(args.output), result)
     print(f"S2_DP_SENDER_PACKETS_SENT={sent}")
     print(f"S2_DP_SENDER_PACKETS_PLANNED={total_packets}")
+    print("S2_DP_SENDER_PACING_MODE=minimum_interval_no_catchup")
+    print(f"S2_DP_SENDER_DEADLINE_MISSES={deadline_misses}")
+    print(f"S2_DP_SENDER_ACTUAL_PAYLOAD_MBPS={actual_payload_mbps:.6f}")
+    print(
+        "S2_DP_SENDER_MAX_SCHEDULER_LATENESS_MS="
+        f"{max(scheduler_lateness_ms) if scheduler_lateness_ms else 0.0:.6f}"
+    )
+    print(
+        "S2_DP_SENDER_MIN_INTER_SEND_MS="
+        f"{min(inter_send_ms) if inter_send_ms else 0.0:.6f}"
+    )
     print(f"S2_DP_SENDER_OK={sent == total_packets and not send_errors}")
     return 0 if sent == total_packets and not send_errors else 1
 
