@@ -159,7 +159,10 @@ PIP_BIN="${PIP_BIN:-$VENV_DIR/bin/pip}"
 PYTHON_REQUIREMENTS_LOCK="${PYTHON_REQUIREMENTS_LOCK:-$REPO_DIR/requirements/python-runtime.lock}"
 
 NETCONF_PORT="${NETCONF_PORT:-830}"
+NETCONF_PIDFILE="${NETCONF_PIDFILE:-/tmp/netopeer2-server.pid}"
+NETCONF_LOG_FILE="${NETCONF_LOG_FILE:-/tmp/netopeer2-server.log}"
 P4_PORT="${P4_PORT:-9559}"
+P4_THRIFT_PORT="${P4_THRIFT_PORT:-9090}"
 P4_ADDR="${P4_ADDR:-127.0.0.1:${P4_PORT}}"
 
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
@@ -744,8 +747,49 @@ configure_netconf() {
   info "NETCONF configurado com usuário=$NETCONF_USER, chave=$NETCONF_KEY e módulo l2i-qos."
 }
 
+stop_netconf() {
+  local pid=""
+  local i
+
+  if [[ -f "$NETCONF_PIDFILE" ]]; then
+    pid="$(cat "$NETCONF_PIDFILE" 2>/dev/null || true)"
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    info "Encerraria o Netopeer2 e removeria $NETCONF_PIDFILE."
+    return 0
+  fi
+
+  if [[ "$pid" =~ ^[0-9]+$ ]] && sudo kill -0 "$pid" 2>/dev/null; then
+    info "Encerrando Netopeer2 pelo PID file (PID=$pid)."
+    sudo kill -TERM "$pid" 2>/dev/null || true
+
+    for ((i=1; i<=30; i++)); do
+      if ! sudo kill -0 "$pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    if sudo kill -0 "$pid" 2>/dev/null; then
+      warn "Netopeer2 não encerrou com SIGTERM; enviando SIGKILL."
+      sudo kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+
+  # Fallback para execuções antigas sem PID file ou com wrappers sudo.
+  sudo pkill -TERM -f '(^|/)netopeer2-server([[:space:]]|$)' 2>/dev/null || true
+  sleep 0.2
+  sudo pkill -KILL -f '(^|/)netopeer2-server([[:space:]]|$)' 2>/dev/null || true
+  sudo rm -f "$NETCONF_PIDFILE"
+}
+
 start_netconf() {
   local netopeer_bin
+  local launcher_pid
+  local pid
+  local i
+
   if command -v netopeer2-server >/dev/null 2>&1; then
     netopeer_bin="$(command -v netopeer2-server)"
   elif [[ -x /usr/local/sbin/netopeer2-server ]]; then
@@ -760,16 +804,52 @@ start_netconf() {
     return 0
   fi
 
-  run sudo pkill -f netopeer2-server || true
+  stop_netconf
   if [[ "$DRY_RUN" == "1" ]]; then
     return 0
   fi
 
-  sudo "$netopeer_bin" -d >/tmp/netopeer2-server.log 2>&1 &
+  sudo rm -f "$NETCONF_PIDFILE"
+
+  sudo -n nohup sh -c '
+    pidfile="$1"
+    logfile="$2"
+    shift 2
+    printf "%s\n" "$$" > "$pidfile"
+    exec "$@" > "$logfile" 2>&1
+  ' sh \
+    "$NETCONF_PIDFILE" \
+    "$NETCONF_LOG_FILE" \
+    "$netopeer_bin" \
+    -d \
+    </dev/null >/dev/null 2>&1 &
+
+  launcher_pid=$!
+
+  for ((i=1; i<=50; i++)); do
+    if [[ -s "$NETCONF_PIDFILE" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  if [[ ! -s "$NETCONF_PIDFILE" ]]; then
+    err "Netopeer2 não gravou o PID file: $NETCONF_PIDFILE"
+    wait "$launcher_pid" 2>/dev/null || true
+    exit 1
+  fi
+
+  pid="$(cat "$NETCONF_PIDFILE")"
+  if ! sudo kill -0 "$pid" 2>/dev/null; then
+    err "Netopeer2 não permaneceu ativo (PID=$pid)."
+    tail -n 80 "$NETCONF_LOG_FILE" >&2 || true
+    exit 1
+  fi
+
   sleep 2
 
   port_listening "$NETCONF_PORT" || {
-    err "NETCONF não abriu a porta $NETCONF_PORT. Verifique /tmp/netopeer2-server.log"
+    err "NETCONF não abriu a porta $NETCONF_PORT. Verifique $NETCONF_LOG_FILE"
     exit 1
   }
 }
@@ -813,26 +893,37 @@ show_bmv2_diagnostics() {
   fi
 }
 
+stop_p4() {
+  require_repo_layout
+  run sudo "$REPO_DIR/scripts/p4_stop.sh"
+}
+
 start_p4() {
   require_repo_layout
   assert_repo_files
 
   local bmv2_log="${BMV2_LOG_FILE:-/tmp/l2i_minimal/bmv2.log}"
+  local timeout="${P4_START_TIMEOUT:-20}"
 
-  if port_listening "$P4_PORT"; then
-    info "P4 já está em execução na porta $P4_PORT."
+  if port_listening "$P4_PORT" && port_listening "$P4_THRIFT_PORT"; then
+    info "P4 já está em execução nas portas $P4_PORT e $P4_THRIFT_PORT."
     return 0
   fi
 
-  run bash -lc "cd '$REPO_DIR' && ./scripts/p4_build_and_run.sh"
+  if port_listening "$P4_PORT" || port_listening "$P4_THRIFT_PORT"; then
+    warn "Estado P4 parcial detectado; reiniciando o BMv2."
+    stop_p4
+  fi
 
-  if wait_for_port "$P4_PORT" "${P4_START_TIMEOUT:-20}"; then
-    info "P4 ativo na porta $P4_PORT."
+  run bash -lc "cd '$REPO_DIR' && P4_THRIFT_PORT='$P4_THRIFT_PORT' ./scripts/p4_build_and_run.sh"
+
+  if wait_for_port "$P4_PORT" "$timeout"      && wait_for_port "$P4_THRIFT_PORT" "$timeout"; then
+    info "P4 ativo nas portas gRPC=$P4_PORT e Thrift=$P4_THRIFT_PORT."
     return 0
   fi
 
   show_bmv2_diagnostics "$bmv2_log"
-  err "P4 não abriu a porta $P4_PORT dentro do tempo esperado."
+  err "P4 não abriu as portas $P4_PORT/$P4_THRIFT_PORT dentro do tempo esperado."
   exit 1
 }
 
@@ -843,9 +934,15 @@ start_real_services() {
   push_p4_pipeline
 
   port_listening "$NETCONF_PORT" || { err "NETCONF não está em escuta."; exit 1; }
-  port_listening "$P4_PORT" || { err "P4 não está em escuta."; exit 1; }
+  port_listening "$P4_PORT" || { err "P4Runtime não está em escuta."; exit 1; }
+  port_listening "$P4_THRIFT_PORT" || { err "P4 Thrift não está em escuta."; exit 1; }
 
-  info "Serviços reais ativos. NETCONF=:$NETCONF_PORT P4=:$P4_PORT"
+  info "Serviços reais ativos. NETCONF=:$NETCONF_PORT P4Runtime=:$P4_PORT Thrift=:$P4_THRIFT_PORT"
+}
+
+stop_real_services() {
+  stop_p4
+  stop_netconf
 }
 
 # -------------------------------
@@ -860,7 +957,8 @@ cleanup_topologies_only() {
 
 cleanup() {
   cleanup_topologies_only
-  run sudo pkill -f netopeer2-server || true
+  run sudo "$REPO_DIR/scripts/p4_stop.sh" --remove-links || true
+  stop_netconf
 }
 
 run_python_module_as_root() {
@@ -960,7 +1058,8 @@ PY
 
 verify_services() {
   port_listening "$NETCONF_PORT" || { err "NETCONF fora de escuta."; exit 1; }
-  wait_for_port "$P4_PORT" 2 || { err "P4 fora de escuta."; exit 1; }
+  wait_for_port "$P4_PORT" 2 || { err "P4Runtime fora de escuta."; exit 1; }
+  wait_for_port "$P4_THRIFT_PORT" 2 || { err "P4 Thrift fora de escuta."; exit 1; }
   info "VERIFY_SERVICES_OK"
 }
 
@@ -1009,6 +1108,7 @@ Ações principais:
   build_netconf
   configure_netconf
   start_real_services
+  stop_real_services
   verify_python_imports
   verify_services
   verify_system_dependency_versions
@@ -1042,6 +1142,7 @@ Variáveis úteis:
   NETCONF_LISTEN_ADDRESS=127.0.0.1
   NETCONF_ENDPOINT_NAME=default-ssh
   P4_PORT=9559
+  P4_THRIFT_PORT=9090
   P4_ADDR=127.0.0.1:9559
   P4_START_TIMEOUT=20
   BMV2_LOG_FILE=/tmp/l2i_minimal/bmv2.log
@@ -1063,6 +1164,11 @@ case "${1:-}" in
   build_p4c) build_p4c ;;
   configure_netconf) configure_netconf ;;
   start_real_services) start_real_services ;;
+  stop_real_services) stop_real_services ;;
+  start_netconf) start_netconf ;;
+  stop_netconf) stop_netconf ;;
+  start_p4) start_p4 ;;
+  stop_p4) stop_p4 ;;
   push_p4_pipeline) push_p4_pipeline ;;
   verify_python_imports) verify_python_imports ;;
   verify_services) verify_services ;;

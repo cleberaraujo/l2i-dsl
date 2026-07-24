@@ -1,85 +1,113 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[CLEANUP] Iniciando limpeza de namespaces e interfaces virtuais..."
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "[CLEANUP][erro] Execute este script como root." >&2
+  exit 1
+fi
 
-# ==============================================================================
-# 1. Remove namespaces usados nos cenários
-# ==============================================================================
+echo "[CLEANUP] Iniciando limpeza seletiva de namespaces e interfaces L2I..."
 
-for ns in h1 h3 h5; do
-  if ip netns list | grep -q "$ns"; then
+# veth0/veth1 pertencem ao serviço persistente BMv2. A limpeza de topologias
+# de cenário nunca deve removê-las. O ciclo de vida dessas interfaces é tratado
+# exclusivamente por p4_build_and_run.sh / p4_stop.sh.
+readonly -a PROTECTED_IFACES=(veth0 veth1)
+
+is_protected_iface() {
+  local candidate="$1"
+  local protected
+
+  for protected in "${PROTECTED_IFACES[@]}"; do
+    if [[ "$candidate" == "$protected" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+delete_link_if_present() {
+  local dev="$1"
+
+  if is_protected_iface "$dev"; then
+    echo "[CLEANUP] Preservando interface do BMv2: $dev"
+    return 0
+  fi
+
+  if ip link show "$dev" >/dev/null 2>&1; then
+    echo "[CLEANUP] Removendo interface $dev..."
+    ip link del "$dev" 2>/dev/null || true
+  fi
+}
+
+delete_namespace_if_present() {
+  local ns="$1"
+
+  if ip netns list | awk '{print $1}' | grep -Fxq "$ns"; then
     echo "[CLEANUP] Removendo namespace $ns..."
     ip netns del "$ns" 2>/dev/null || true
   fi
+}
+
+# Namespaces conhecidos dos cenários canônicos, variantes históricas e teste
+# isolado do backend Linux TC.
+for ns in h1 h2 h3 h4 h5 l2i-tc-test; do
+  delete_namespace_if_present "$ns"
 done
 
-# ==============================================================================
-# 2. Remove bridges usadas nos domínios
-# ==============================================================================
-
-for br in brA brB brC; do
-  if ip link show "$br" &>/dev/null; then
-    echo "[CLEANUP] Removendo bridge $br..."
-    ip link del "$br" type bridge 2>/dev/null || true
-  fi
+# Bridges conhecidas. Não há descoberta genérica de bridges para evitar tocar
+# em dispositivos externos ao artefato.
+for br in brA brB brC br-s1 br-s2 brs2; do
+  delete_link_if_present "$br"
 done
 
-# ==============================================================================
-# 3. Remove interfaces veth conhecidas por nome fixo
-# ==============================================================================
-
-KNOWN_IFACES=(
+# Interfaces com nomes fixos usadas pelas topologias e versões históricas.
+readonly -a KNOWN_IFACES=(
   A_B_A A_B_B A_C_A A_C_C
   tapA1 tapB3 tapC5
-  A-B B-A B-C C-B
-  C-A A-C
+  A-B B-A B-C C-B C-A A-C
+  tap_h1-eth0 tap_h2-eth0 tap_h3-eth0 tap_h4-eth0 tap_h5-eth0
+  h1-eth0-br h2-eth0-br h3-eth0-br h4-eth0-br h5-eth0-br
+  veth-br-h1 veth-br-h2 veth-br-h3 veth-br-h4 veth-br-h5
+  l2itc-host
 )
 
-for ifc in "${KNOWN_IFACES[@]}"; do
-  if ip link show "$ifc" &>/dev/null; then
-    echo "[CLEANUP] Removendo interface $ifc..."
-    ip link del "$ifc" 2>/dev/null || true
+for dev in "${KNOWN_IFACES[@]}"; do
+  delete_link_if_present "$dev"
+done
+
+# Descoberta residual restrita a padrões pertencentes ao artefato. A antiga
+# regra baseada em '@' alcançava todo par veth do host e, por isso, removia
+# indevidamente veth0/veth1 do BMv2.
+mapfile -t residual_ifaces < <(
+  ip -o link show \
+    | awk -F': ' '{print $2}' \
+    | cut -d'@' -f1 \
+    | awk '
+        /^tap_/ ||
+        /^(A|B|C)-/ ||
+        /^h[0-9]+-eth[0-9]+-br$/ ||
+        /^veth-br-h[0-9]+$/ ||
+        /^l2itc-/
+      ' \
+    | sort -u
+)
+
+for dev in "${residual_ifaces[@]}"; do
+  [[ -n "$dev" ]] || continue
+  delete_link_if_present "$dev"
+done
+
+echo "[CLEANUP] Limpeza seletiva concluída."
+
+echo "[CLEANUP] Estado das interfaces protegidas do BMv2:"
+for dev in "${PROTECTED_IFACES[@]}"; do
+  if ip link show "$dev" >/dev/null 2>&1; then
+    echo "[CLEANUP] P4_LINK_PRESERVED=$dev"
+  else
+    echo "[CLEANUP] P4_LINK_NOT_PRESENT=$dev"
   fi
 done
-
-# ==============================================================================
-# 4. Remove dinamicamente interfaces temporárias (geradas por testes)
-#    - tap_*  (ex: tap_h3-eth0, tap_h5-eth0)
-#    - *_@*   (pares veth com nome composto)
-#    - *_eth* (algumas criadas em bridges)
-# ==============================================================================
-
-for ifc in $(ip -o link show | awk -F': ' '{print $2}' | grep -E '(^tap_|@|A-|B-|C-)' | cut -d'@' -f1); do
-  if [[ "$ifc" != "enp"* && "$ifc" != "lo" ]]; then
-    echo "[CLEANUP] Removendo interface residual $ifc..."
-    ip link del "$ifc" 2>/dev/null || true
-  fi
-done
-
-# ==============================================================================
-# 5. Remove links órfãos que sobraram (sem par veth correspondente)
-# ==============================================================================
-
-echo "[CLEANUP] Verificando links órfãos..."
-orphans=$(ip -o link show | grep -E "state DOWN" | grep -E "veth|tap|A-|B-|C-" | awk -F': ' '{print $2}' | cut -d'@' -f1)
-for ifc in $orphans; do
-  echo "[CLEANUP] Removendo link órfão $ifc..."
-  ip link del "$ifc" 2>/dev/null || true
-done
-
-# ==============================================================================
-# 6. Limpeza final e status
-# ==============================================================================
-
-echo "[CLEANUP] Limpeza concluída. Estado atual das interfaces:"
-ip -brief link show
 
 echo "[CLEANUP] Namespaces restantes:"
 ip netns list || true
-
-sudo ip netns del h1 2>/dev/null; sudo ip netns del h2 2>/dev/null; sudo ip netns del h3 2>/dev/null
-sudo ip link del brA 2>/dev/null; sudo ip link del brB 2>/dev/null; sudo ip link del brC 2>/dev/null
-sudo ip link del A-B 2>/dev/null; sudo ip link del B-A 2>/dev/null
-sudo ip link del B-C 2>/dev/null; sudo ip link del C-B 2>/dev/null
-sudo ip link del tap_h1-eth0 2>/dev/null; sudo ip link del tap_h2-eth0 2>/dev/null; sudo ip link del tap_h3-eth0 2>/dev/null

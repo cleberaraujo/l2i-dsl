@@ -1,17 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUTDIR="/tmp/l2i_minimal"
-PIDFILE="$OUTDIR/bmv2.pid"
+OUTDIR="${P4_OUTDIR:-/tmp/l2i_minimal}"
+PIDFILE="${BMV2_PIDFILE:-$OUTDIR/bmv2.pid}"
+REMOVE_LINKS=0
 
-if [[ -f "$PIDFILE" ]]; then
-  PID="$(cat "$PIDFILE" || true)"
-  if [[ -n "${PID}" ]] && ps -p "$PID" >/dev/null 2>&1; then
-    echo "[stop] Matando BMv2 (PID=$PID)"
-    kill "$PID" || true
-    sleep 0.3
+case "${1:-}" in
+  "") ;;
+  --remove-links) REMOVE_LINKS=1 ;;
+  *)
+    echo "Uso: $0 [--remove-links]" >&2
+    exit 2
+    ;;
+esac
+
+as_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+  else
+    sudo -n "$@"
   fi
-  rm -f "$PIDFILE"
+}
+
+wait_process_exit() {
+  local pid="$1"
+  local _
+
+  for _ in $(seq 1 30); do
+    if ! as_root kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  return 1
+}
+
+stop_pid=""
+if [[ -f "$PIDFILE" ]]; then
+  stop_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
 fi
 
-echo "[ok] Encerrado."
+if [[ "$stop_pid" =~ ^[0-9]+$ ]] \
+   && as_root kill -0 "$stop_pid" 2>/dev/null; then
+  echo "[stop] Encerrando BMv2 pelo PID file (PID=$stop_pid)"
+  as_root kill -TERM "$stop_pid" 2>/dev/null || true
+
+  if ! wait_process_exit "$stop_pid"; then
+    echo "[stop] BMv2 não encerrou com SIGTERM; enviando SIGKILL."
+    as_root kill -KILL "$stop_pid" 2>/dev/null || true
+    wait_process_exit "$stop_pid" || true
+  fi
+fi
+
+# Fallback para versões antigas cujo PID file continha o PID do sudo ou estava
+# ausente. O padrão ancora o nome do executável e não depende do caminho.
+if pgrep -f '(^|/)simple_switch_grpc([[:space:]]|$)' >/dev/null 2>&1; then
+  echo "[stop] Encerrando instância BMv2 residual por nome."
+  as_root pkill -TERM -f '(^|/)simple_switch_grpc([[:space:]]|$)' 2>/dev/null || true
+  sleep 0.3
+fi
+
+if pgrep -f '(^|/)simple_switch_grpc([[:space:]]|$)' >/dev/null 2>&1; then
+  as_root pkill -KILL -f '(^|/)simple_switch_grpc([[:space:]]|$)' 2>/dev/null || true
+fi
+
+as_root rm -f "$PIDFILE"
+
+if [[ "$REMOVE_LINKS" -eq 1 ]]; then
+  echo "[stop] Removendo interfaces persistentes veth0/veth1."
+  as_root ip link del veth0 2>/dev/null || true
+  as_root ip link del veth1 2>/dev/null || true
+fi
+
+echo "[ok] BMv2 encerrado."
