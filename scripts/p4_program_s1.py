@@ -13,6 +13,12 @@ import ipaddress
 import sys
 from pathlib import Path
 
+# Allow direct execution as ``python scripts/p4_program_s1.py`` without
+# requiring the repository to be installed as a Python package.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from google.protobuf import text_format
 from p4.config.v1 import p4info_pb2
 from p4.v1 import p4runtime_pb2
