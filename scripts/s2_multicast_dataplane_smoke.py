@@ -178,9 +178,29 @@ def receiver(args: argparse.Namespace) -> int:
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
     sock.settimeout(0.2)
 
-    deadline = time.monotonic() + float(args.duration)
+    ready_file = Path(args.ready_file) if args.ready_file else None
+    stop_file = Path(args.stop_file) if args.stop_file else None
+    started_ns = time.monotonic_ns()
+    ready_ns = time.monotonic_ns()
+
+    if ready_file is not None:
+        dump_json(
+            ready_file,
+            {
+                "label": args.label,
+                "group": args.group,
+                "port": args.port,
+                "interface_ip": args.interface_ip,
+                "ready_monotonic_ns": ready_ns,
+            },
+        )
+        print(f"S2_DP_RECEIVER_{args.label}_READY=True", flush=True)
+
+    safety_deadline = time.monotonic() + float(args.duration)
     first_receive_ns: int | None = None
     last_receive_ns: int | None = None
+    stop_observed_ns: int | None = None
+    termination_reason = "safety_timeout"
     sequences: list[int] = []
     unique: set[int] = set()
     delays_ms: list[float] = []
@@ -188,12 +208,21 @@ def receiver(args: argparse.Namespace) -> int:
     malformed = 0
     expected_total: int | None = None
 
-    while time.monotonic() < deadline:
+    while True:
+        if stop_file is not None and stop_file.exists():
+            stop_observed_ns = time.monotonic_ns()
+            termination_reason = "stop_signal"
+            break
+
+        if time.monotonic() >= safety_deadline:
+            break
+
         try:
             data, _peer = sock.recvfrom(65535)
         except socket.timeout:
             continue
         except OSError:
+            termination_reason = "socket_error"
             break
 
         receive_ns = time.monotonic_ns()
@@ -228,6 +257,7 @@ def receiver(args: argparse.Namespace) -> int:
     except OSError:
         pass
     sock.close()
+    completed_ns = time.monotonic_ns()
 
     result = {
         "role": "receiver",
@@ -236,6 +266,15 @@ def receiver(args: argparse.Namespace) -> int:
         "port": args.port,
         "interface_ip": args.interface_ip,
         "duration_s": args.duration,
+        "lifecycle": {
+            "mode": "explicit_ready_and_stop" if stop_file is not None else "fixed_duration",
+            "ready_file": str(ready_file) if ready_file is not None else None,
+            "stop_file": str(stop_file) if stop_file is not None else None,
+            "ready_monotonic_ns": ready_ns,
+            "stop_observed_monotonic_ns": stop_observed_ns,
+            "termination_reason": termination_reason,
+            "runtime_s": (completed_ns - started_ns) / 1_000_000_000.0,
+        },
         "expected_total_from_payload": expected_total,
         "unique_received": len(unique),
         "duplicates": duplicates,
@@ -257,7 +296,8 @@ def receiver(args: argparse.Namespace) -> int:
     print(f"S2_DP_RECEIVER_{args.label}_UNIQUE={len(unique)}")
     print(f"S2_DP_RECEIVER_{args.label}_DUPLICATES={duplicates}")
     print(f"S2_DP_RECEIVER_{args.label}_MALFORMED={malformed}")
-    return 0
+    print(f"S2_DP_RECEIVER_{args.label}_TERMINATION_REASON={termination_reason}")
+    return 0 if termination_reason != "socket_error" else 1
 
 
 def parse_receiver(value: str) -> tuple[str, str, str]:
@@ -270,14 +310,19 @@ def parse_receiver(value: str) -> tuple[str, str, str]:
 def orchestrate(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    control_dir = output_dir / "control"
+    control_dir.mkdir(parents=True, exist_ok=True)
     script = Path(__file__).resolve()
     python = sys.executable
 
-    receiver_duration = float(args.duration) + float(args.receiver_grace_s) + 1.0
-    receiver_processes: list[tuple[str, Path, subprocess.Popen[str]]] = []
+    receiver_processes: list[tuple[str, Path, Path, Path, subprocess.Popen[str]]] = []
 
     for label, namespace, interface_ip in args.receiver:
         output = output_dir / f"receiver_{label}.json"
+        ready_file = control_dir / f"receiver_{label}.ready.json"
+        stop_file = control_dir / f"receiver_{label}.stop"
+        ready_file.unlink(missing_ok=True)
+        stop_file.unlink(missing_ok=True)
         command = [
             "ip", "netns", "exec", namespace,
             python, str(script), "receiver",
@@ -285,13 +330,29 @@ def orchestrate(args: argparse.Namespace) -> int:
             "--group", args.group,
             "--port", str(args.port),
             "--interface-ip", interface_ip,
-            "--duration", str(receiver_duration),
+            "--duration", str(args.receiver_max_runtime_s),
+            "--ready-file", str(ready_file),
+            "--stop-file", str(stop_file),
             "--output", str(output),
         ]
         process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        receiver_processes.append((label, output, process))
+        receiver_processes.append((label, output, ready_file, stop_file, process))
 
-    time.sleep(float(args.receiver_ready_s))
+    readiness_started = time.monotonic()
+    readiness_deadline = readiness_started + float(args.receiver_ready_timeout_s)
+    readiness_ok = False
+
+    while time.monotonic() < readiness_deadline:
+        readiness_ok = all(ready_file.is_file() for _, _, ready_file, _, _ in receiver_processes)
+        if readiness_ok:
+            break
+        if any(process.poll() is not None for _, _, _, _, process in receiver_processes):
+            break
+        time.sleep(0.05)
+
+    readiness_wait_s = time.monotonic() - readiness_started
+    print(f"S2_DP_RECEIVER_READINESS_OK={readiness_ok}")
+    print(f"S2_DP_RECEIVER_READINESS_WAIT_S={readiness_wait_s:.6f}")
 
     sender_output = output_dir / "sender.json"
     sender_command = [
@@ -305,7 +366,25 @@ def orchestrate(args: argparse.Namespace) -> int:
         "--packet-size", str(args.packet_size),
         "--output", str(sender_output),
     ]
-    sender_completed = subprocess.run(sender_command, text=True, capture_output=True, check=False)
+
+    if readiness_ok:
+        sender_completed = subprocess.run(sender_command, text=True, capture_output=True, check=False)
+        if sender_completed.stdout:
+            print(sender_completed.stdout, end="")
+        if sender_completed.stderr:
+            print(sender_completed.stderr, end="", file=sys.stderr)
+        time.sleep(float(args.receiver_drain_s))
+    else:
+        sender_completed = subprocess.CompletedProcess(
+            sender_command,
+            returncode=1,
+            stdout="",
+            stderr="receiver readiness barrier failed",
+        )
+
+    stop_signalled_ns = time.monotonic_ns()
+    for _label, _output, _ready_file, stop_file, _process in receiver_processes:
+        stop_file.touch()
 
     worker_logs: dict[str, Any] = {
         "sender": {
@@ -316,9 +395,10 @@ def orchestrate(args: argparse.Namespace) -> int:
         }
     }
 
-    for label, output, process in receiver_processes:
+    receiver_returncodes_ok = True
+    for label, output, ready_file, stop_file, process in receiver_processes:
         try:
-            stdout, stderr = process.communicate(timeout=receiver_duration + 3.0)
+            stdout, stderr = process.communicate(timeout=float(args.receiver_stop_timeout_s))
         except subprocess.TimeoutExpired:
             process.terminate()
             try:
@@ -326,11 +406,18 @@ def orchestrate(args: argparse.Namespace) -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
                 stdout, stderr = process.communicate()
+        receiver_returncodes_ok = receiver_returncodes_ok and process.returncode == 0
+        if stdout:
+            print(stdout, end="")
+        if stderr:
+            print(stderr, end="", file=sys.stderr)
         worker_logs[f"receiver_{label}"] = {
             "returncode": process.returncode,
             "stdout": stdout,
             "stderr": stderr,
             "output": str(output),
+            "ready_file": str(ready_file),
+            "stop_file": str(stop_file),
         }
 
     if not sender_output.is_file():
@@ -340,10 +427,16 @@ def orchestrate(args: argparse.Namespace) -> int:
     sender_data = json.loads(sender_output.read_text(encoding="utf-8"))
     sent = int(sender_data.get("packets_sent") or 0)
     planned = int(sender_data.get("packets_planned") or 0)
-    all_ok = sender_completed.returncode == 0 and sent > 0 and sent == planned
+    all_ok = (
+        readiness_ok
+        and receiver_returncodes_ok
+        and sender_completed.returncode == 0
+        and sent > 0
+        and sent == planned
+    )
 
     receivers_summary: dict[str, Any] = {}
-    for label, output, _process in receiver_processes:
+    for label, output, ready_file, stop_file, process in receiver_processes:
         if not output.is_file():
             receivers_summary[label] = {"artifact_present": False}
             all_ok = False
@@ -353,19 +446,26 @@ def orchestrate(args: argparse.Namespace) -> int:
         valid_received = len({seq for seq in received_sequences if 0 <= seq < planned})
         unexpected = len(received_sequences) - valid_received
         ratio = (valid_received / planned) if planned else 0.0
+        lifecycle = data.get("lifecycle") or {}
         receiver_ok = (
             ratio >= float(args.min_delivery)
             and int(data.get("malformed") or 0) == 0
             and unexpected == 0
+            and lifecycle.get("termination_reason") == "stop_signal"
+            and process.returncode == 0
         )
         all_ok = all_ok and receiver_ok
         receivers_summary[label] = {
             "artifact_present": True,
+            "ready_file_present": ready_file.is_file(),
+            "stop_file_present": stop_file.is_file(),
+            "returncode": process.returncode,
             "valid_received": valid_received,
             "unexpected_sequences": unexpected,
             "delivery_ratio": ratio,
             "duplicates": int(data.get("duplicates") or 0),
             "malformed": int(data.get("malformed") or 0),
+            "lifecycle": lifecycle,
             "one_way_delay_ms": data.get("one_way_delay_ms"),
             "ok": receiver_ok,
         }
@@ -379,12 +479,23 @@ def orchestrate(args: argparse.Namespace) -> int:
             "multicast_dataplane_exercised": True,
             "qos_contention_exercised": False,
             "recovery_metrics_exercised": False,
+            "requested_sender_rate_validated": False,
         },
         "group": args.group,
         "port": args.port,
         "source": {
             "namespace": args.source_namespace,
             "ip": args.source_ip,
+        },
+        "receiver_lifecycle": {
+            "mode": "explicit_readiness_sender_completion_drain_stop",
+            "readiness_ok": readiness_ok,
+            "readiness_wait_s": readiness_wait_s,
+            "ready_timeout_s": args.receiver_ready_timeout_s,
+            "drain_s": args.receiver_drain_s,
+            "max_runtime_s": args.receiver_max_runtime_s,
+            "stop_timeout_s": args.receiver_stop_timeout_s,
+            "stop_signalled_monotonic_ns": stop_signalled_ns,
         },
         "receivers": receivers_summary,
         "sender": sender_data,
@@ -396,9 +507,12 @@ def orchestrate(args: argparse.Namespace) -> int:
     dump_json(summary_path, summary)
 
     print(f"S2_DP_SUMMARY={summary_path}")
+    print("S2_DP_RECEIVER_LIFECYCLE_MODE=explicit_readiness_sender_completion_drain_stop")
+    print(f"S2_DP_RECEIVER_STOP_SIGNALLED=True")
     print(f"S2_DP_DATAPLANE_EXERCISED=True")
     print(f"S2_DP_QOS_CONTENTION_EXERCISED=False")
     print(f"S2_DP_RECOVERY_METRICS_EXERCISED=False")
+    print(f"S2_DP_REQUESTED_SENDER_RATE_VALIDATED=False")
     if all_ok:
         print("PHASE12_S2_P4_MULTICAST_DATAPLANE_SMOKE_OK")
         return 0
@@ -425,6 +539,8 @@ def build_parser() -> argparse.ArgumentParser:
     recv.add_argument("--port", type=int, required=True)
     recv.add_argument("--interface-ip", required=True)
     recv.add_argument("--duration", type=float, required=True)
+    recv.add_argument("--ready-file")
+    recv.add_argument("--stop-file")
     recv.add_argument("--output", required=True)
 
     orch = sub.add_parser("orchestrate")
@@ -437,8 +553,10 @@ def build_parser() -> argparse.ArgumentParser:
     orch.add_argument("--rate-mbps", type=float, default=2.0)
     orch.add_argument("--packet-size", type=int, default=1200)
     orch.add_argument("--min-delivery", type=float, default=0.99)
-    orch.add_argument("--receiver-ready-s", type=float, default=1.0)
-    orch.add_argument("--receiver-grace-s", type=float, default=1.0)
+    orch.add_argument("--receiver-ready-timeout-s", type=float, default=10.0)
+    orch.add_argument("--receiver-drain-s", type=float, default=1.0)
+    orch.add_argument("--receiver-max-runtime-s", type=float, default=300.0)
+    orch.add_argument("--receiver-stop-timeout-s", type=float, default=5.0)
     orch.add_argument("--output-dir", required=True)
     return parser
 
