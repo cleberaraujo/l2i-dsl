@@ -11,7 +11,7 @@ echo "[CLEANUP] Iniciando limpeza seletiva de namespaces e interfaces L2I..."
 # veth0/veth1 pertencem ao serviço persistente BMv2. A limpeza de topologias
 # de cenário nunca deve removê-las. O ciclo de vida dessas interfaces é tratado
 # exclusivamente por p4_build_and_run.sh / p4_stop.sh.
-readonly -a PROTECTED_IFACES=(veth0 veth1)
+readonly -a PROTECTED_IFACES=(veth0 veth0-peer veth1 veth1-peer)
 
 is_protected_iface() {
   local candidate="$1"

@@ -163,6 +163,8 @@ NETCONF_PIDFILE="${NETCONF_PIDFILE:-/tmp/netopeer2-server.pid}"
 NETCONF_LOG_FILE="${NETCONF_LOG_FILE:-/tmp/netopeer2-server.log}"
 P4_PORT="${P4_PORT:-9559}"
 P4_THRIFT_PORT="${P4_THRIFT_PORT:-9090}"
+P4_REQUIRE_THRIFT="${P4_REQUIRE_THRIFT:-0}"
+P4_GRPC_ADDR="${P4_GRPC_ADDR:-0.0.0.0:${P4_PORT}}"
 P4_ADDR="${P4_ADDR:-127.0.0.1:${P4_PORT}}"
 
 RESULTS_DIR="${RESULTS_DIR:-$REPO_DIR/results}"
@@ -272,7 +274,7 @@ autotools_build_install() {
 
 port_listening() {
   local port="$1"
-  ss -ltn "( sport = :$port )" | tail -n +2 | grep -q ":$port"
+  ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .
 }
 
 assert_system_tools() {
@@ -905,8 +907,12 @@ show_bmv2_diagnostics() {
   fi
 
   if [[ -f "$log_file" ]]; then
+    warn "Metadados de $log_file:"
+    stat "$log_file" >&2 || true
+    warn "Primeiras linhas de $log_file:"
+    sed -n '1,80p' "$log_file" >&2 || true
     warn "Últimas linhas de $log_file:"
-    tail -n 60 "$log_file" >&2 || true
+    tail -n 80 "$log_file" >&2 || true
   else
     warn "Arquivo de log do BMv2 não encontrado em $log_file."
   fi
@@ -924,26 +930,42 @@ start_p4() {
   local bmv2_log="${BMV2_LOG_FILE:-/tmp/l2i_minimal/bmv2.log}"
   local timeout="${P4_START_TIMEOUT:-20}"
 
-  if port_listening "$P4_PORT" && port_listening "$P4_THRIFT_PORT"; then
-    info "P4 já está em execução nas portas $P4_PORT e $P4_THRIFT_PORT."
-    return 0
-  fi
-
-  if port_listening "$P4_PORT" || port_listening "$P4_THRIFT_PORT"; then
-    warn "Estado P4 parcial detectado; reiniciando o BMv2."
+  if port_listening "$P4_PORT"; then
+    if [[ "$P4_REQUIRE_THRIFT" == "1" ]] \
+       && ! port_listening "$P4_THRIFT_PORT"; then
+      warn "P4Runtime ativo, mas Thrift obrigatório está ausente; reiniciando o BMv2."
+      stop_p4
+    else
+      info "P4Runtime já está em execução na porta $P4_PORT."
+      if port_listening "$P4_THRIFT_PORT"; then
+        info "P4 Thrift opcional também está ativo na porta $P4_THRIFT_PORT."
+      else
+        info "P4 Thrift opcional não está disponível neste build."
+      fi
+      return 0
+    fi
+  elif port_listening "$P4_THRIFT_PORT"; then
+    warn "Thrift ativo sem P4Runtime; reiniciando o BMv2."
     stop_p4
   fi
 
-  run bash -lc "cd '$REPO_DIR' && P4_THRIFT_PORT='$P4_THRIFT_PORT' ./scripts/p4_build_and_run.sh"
+  run bash -lc "cd '$REPO_DIR' && P4_THRIFT_PORT='$P4_THRIFT_PORT' P4_REQUIRE_THRIFT='$P4_REQUIRE_THRIFT' P4_GRPC_ADDR='$P4_GRPC_ADDR' ./scripts/p4_build_and_run.sh"
 
-  if wait_for_port "$P4_PORT" "$timeout"      && wait_for_port "$P4_THRIFT_PORT" "$timeout"; then
-    info "P4 ativo nas portas gRPC=$P4_PORT e Thrift=$P4_THRIFT_PORT."
-    return 0
+  if ! wait_for_port "$P4_PORT" "$timeout"; then
+    show_bmv2_diagnostics "$bmv2_log"
+    err "P4Runtime não abriu a porta $P4_PORT dentro do tempo esperado."
+    exit 1
   fi
 
-  show_bmv2_diagnostics "$bmv2_log"
-  err "P4 não abriu as portas $P4_PORT/$P4_THRIFT_PORT dentro do tempo esperado."
-  exit 1
+  if port_listening "$P4_THRIFT_PORT"; then
+    info "P4 ativo. P4Runtime=:$P4_PORT Thrift=:$P4_THRIFT_PORT."
+  elif [[ "$P4_REQUIRE_THRIFT" == "1" ]]; then
+    show_bmv2_diagnostics "$bmv2_log"
+    err "P4Runtime abriu, mas o Thrift obrigatório não abriu a porta $P4_THRIFT_PORT."
+    exit 1
+  else
+    info "P4 ativo. P4Runtime=:$P4_PORT; Thrift opcional indisponível neste build."
+  fi
 }
 
 start_real_services() {
@@ -954,9 +976,16 @@ start_real_services() {
 
   port_listening "$NETCONF_PORT" || { err "NETCONF não está em escuta."; exit 1; }
   port_listening "$P4_PORT" || { err "P4Runtime não está em escuta."; exit 1; }
-  port_listening "$P4_THRIFT_PORT" || { err "P4 Thrift não está em escuta."; exit 1; }
 
-  info "Serviços reais ativos. NETCONF=:$NETCONF_PORT P4Runtime=:$P4_PORT Thrift=:$P4_THRIFT_PORT"
+  if [[ "$P4_REQUIRE_THRIFT" == "1" ]]; then
+    port_listening "$P4_THRIFT_PORT" || { err "P4 Thrift obrigatório não está em escuta."; exit 1; }
+  fi
+
+  if port_listening "$P4_THRIFT_PORT"; then
+    info "Serviços reais ativos. NETCONF=:$NETCONF_PORT P4Runtime=:$P4_PORT Thrift=:$P4_THRIFT_PORT"
+  else
+    info "Serviços reais ativos. NETCONF=:$NETCONF_PORT P4Runtime=:$P4_PORT Thrift=indisponível/opcional"
+  fi
 }
 
 stop_real_services() {
@@ -1078,8 +1107,16 @@ PY
 verify_services() {
   port_listening "$NETCONF_PORT" || { err "NETCONF fora de escuta."; exit 1; }
   wait_for_port "$P4_PORT" 2 || { err "P4Runtime fora de escuta."; exit 1; }
-  wait_for_port "$P4_THRIFT_PORT" 2 || { err "P4 Thrift fora de escuta."; exit 1; }
-  info "VERIFY_SERVICES_OK"
+
+  if [[ "$P4_REQUIRE_THRIFT" == "1" ]]; then
+    wait_for_port "$P4_THRIFT_PORT" 2 || { err "P4 Thrift obrigatório fora de escuta."; exit 1; }
+  fi
+
+  if port_listening "$P4_THRIFT_PORT"; then
+    info "VERIFY_SERVICES_OK (NETCONF, P4Runtime e Thrift)."
+  else
+    info "VERIFY_SERVICES_OK (NETCONF e P4Runtime; Thrift opcional indisponível)."
+  fi
 }
 
 collect_provenance() {
