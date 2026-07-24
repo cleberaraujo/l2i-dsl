@@ -151,6 +151,8 @@ DRY_RUN="${DRY_RUN:-0}"
 NETCONF_USER="${NETCONF_USER:-netconf}"
 NETCONF_HOME="${NETCONF_HOME:-/var/lib/netconf}"
 NETCONF_KEY="${NETCONF_KEY:-$HOME_DIR/.ssh/l2i_netconf_key}"
+NETCONF_LISTEN_ADDRESS="${NETCONF_LISTEN_ADDRESS:-127.0.0.1}"
+NETCONF_ENDPOINT_NAME="${NETCONF_ENDPOINT_NAME:-default-ssh}"
 
 PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
 PIP_BIN="${PIP_BIN:-$VENV_DIR/bin/pip}"
@@ -594,30 +596,96 @@ write_nacm_file() {
 XML
 }
 
+ensure_netopeer2_hostkey() {
+  local hostkey_script="$NET_SRC_DIR/Netopeer2/scripts/merge_hostkey.sh"
+  local sysrepocfg_bin openssl_bin hostkey_state
+
+  [[ -f "$hostkey_script" ]] || {
+    err "Script de provisionamento da host key não encontrado: $hostkey_script"
+    exit 1
+  }
+
+  sysrepocfg_bin="$(command -v sysrepocfg || true)"
+  openssl_bin="$(command -v openssl || true)"
+  [[ -n "$sysrepocfg_bin" ]] || {
+    err "sysrepocfg não encontrado. Execute build_netconf antes."
+    exit 1
+  }
+  [[ -n "$openssl_bin" ]] || {
+    err "openssl não encontrado."
+    exit 1
+  }
+
+  run sudo env \
+    SYSREPOCFG_EXECUTABLE="$sysrepocfg_bin" \
+    OPENSSL_EXECUTABLE="$openssl_bin" \
+    bash "$hostkey_script"
+
+  if [[ "$DRY_RUN" != "1" ]]; then
+    hostkey_state="$(
+      sudo "$sysrepocfg_bin" -X \
+        -x "/ietf-keystore:keystore/asymmetric-keys/asymmetric-key[name='genkey']/name" \
+        2>/dev/null || true
+    )"
+    grep -Fq "genkey" <<<"$hostkey_state" || {
+      err "A host key genkey não foi encontrada no ietf-keystore."
+      exit 1
+    }
+  fi
+}
+
 write_netconf_user_auth_file() {
   local auth_file="$REPO_DIR/l2i-netconf-user-auth.xml"
+  local client_key_algorithm client_key_data
+
+  [[ -f "$NETCONF_KEY.pub" ]] || {
+    err "Chave pública NETCONF ausente: $NETCONF_KEY.pub"
+    exit 1
+  }
+
+  read -r client_key_algorithm client_key_data _ < "$NETCONF_KEY.pub"
+  [[ -n "$client_key_algorithm" && -n "$client_key_data" ]] || {
+    err "Formato inválido da chave pública NETCONF: $NETCONF_KEY.pub"
+    exit 1
+  }
+
   cat > "$auth_file" <<XML
 <netconf-server xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-server">
   <listen>
-    <endpoints>
-      <endpoint>
-        <name>${NETCONF_ENDPOINT_NAME:-default-ssh}</name>
-        <ssh>
-          <ssh-server-parameters>
-            <client-authentication>
-              <users>
-                <user>
-                  <name>${NETCONF_USER}</name>
-                  <public-keys>
-                    <use-system-keys xmlns="urn:cesnet:libnetconf2-netconf-server"/>
-                  </public-keys>
-                </user>
-              </users>
-            </client-authentication>
-          </ssh-server-parameters>
-        </ssh>
-      </endpoint>
-    </endpoints>
+    <endpoint>
+      <name>${NETCONF_ENDPOINT_NAME}</name>
+      <ssh>
+        <tcp-server-parameters>
+          <local-address>${NETCONF_LISTEN_ADDRESS}</local-address>
+          <local-port>${NETCONF_PORT}</local-port>
+        </tcp-server-parameters>
+        <ssh-server-parameters>
+          <server-identity>
+            <host-key>
+              <name>default-key</name>
+              <public-key>
+                <keystore-reference>genkey</keystore-reference>
+              </public-key>
+            </host-key>
+          </server-identity>
+          <client-authentication>
+            <supported-authentication-methods>
+              <publickey/>
+            </supported-authentication-methods>
+            <users>
+              <user>
+                <name>${NETCONF_USER}</name>
+                <authorized-key>
+                  <name>l2i-client-key</name>
+                  <algorithm>${client_key_algorithm}</algorithm>
+                  <key-data>${client_key_data}</key-data>
+                </authorized-key>
+              </user>
+            </users>
+          </client-authentication>
+        </ssh-server-parameters>
+      </ssh>
+    </endpoint>
   </listen>
 </netconf-server>
 XML
@@ -625,6 +693,7 @@ XML
 
 apply_netconf_user_auth() {
   local auth_file="$REPO_DIR/l2i-netconf-user-auth.xml"
+  ensure_netopeer2_hostkey
   write_netconf_user_auth_file
   run sudo sysrepocfg --edit="$auth_file" -d running -f xml -m ietf-netconf-server
   run sudo sysrepocfg --edit="$auth_file" -d startup -f xml -m ietf-netconf-server
@@ -635,11 +704,14 @@ configure_netconf() {
   assert_repo_files
 
   if ! id -u "$NETCONF_USER" >/dev/null 2>&1; then
-    run sudo useradd --system --shell /usr/sbin/nologin       --home-dir "$NETCONF_HOME" --create-home "$NETCONF_USER"
+    run sudo useradd --system --shell /usr/sbin/nologin \
+      --home-dir "$NETCONF_HOME" --create-home "$NETCONF_USER"
   else
     info "Usuário NETCONF já existe: $NETCONF_USER"
+    run sudo usermod --shell /usr/sbin/nologin --home "$NETCONF_HOME" "$NETCONF_USER"
   fi
 
+  run mkdir -p "$(dirname "$NETCONF_KEY")"
   if [[ ! -f "$NETCONF_KEY" ]]; then
     run ssh-keygen -t rsa -b 2048 -f "$NETCONF_KEY" -N ""
   fi
@@ -649,8 +721,8 @@ configure_netconf() {
   run sudo install -o "$NETCONF_USER" -g "$NETCONF_USER" -m 600 "$NETCONF_KEY.pub" "$NETCONF_HOME/.ssh/authorized_keys"
   run sudo chown -R "$NETCONF_USER:$NETCONF_USER" "$NETCONF_HOME"
 
-  info "Mantendo a configuração de listener SSH padrão do Netopeer2 para evitar incompatibilidades entre revisões do módulo ietf-netconf-server."
-  info "Aplicando explicitamente o cadastro do usuário NETCONF no endpoint padrão do servidor."
+  info "Provisionando a identidade SSH do Netopeer2 no ietf-keystore."
+  info "Aplicando listener NETCONF canônico em ${NETCONF_LISTEN_ADDRESS}:${NETCONF_PORT}."
 
   if ! command -v sysrepoctl >/dev/null 2>&1; then
     err "sysrepoctl não encontrado. Execute build_netconf antes."
@@ -665,8 +737,6 @@ configure_netconf() {
 
   apply_netconf_user_auth
 
-  # Mantemos a configuração de escuta do servidor NETCONF no padrão instalado pelo Netopeer2.
-  # Isso reduz fragilidade entre versões distintas do módulo ietf-netconf-server.
   write_nacm_file
   run sudo sysrepocfg --import="$REPO_DIR/l2i-nacm-netconf-permit.xml" -f xml -d running -m ietf-netconf-acm
   run sudo sysrepocfg --import="$REPO_DIR/l2i-nacm-netconf-permit.xml" -f xml -d startup -m ietf-netconf-acm
@@ -969,6 +1039,7 @@ Variáveis úteis:
   NETCONF_USER=netconf
   NETCONF_KEY=$HOME/.ssh/l2i_netconf_key
   NETCONF_PORT=830
+  NETCONF_LISTEN_ADDRESS=127.0.0.1
   NETCONF_ENDPOINT_NAME=default-ssh
   P4_PORT=9559
   P4_ADDR=127.0.0.1:9559
