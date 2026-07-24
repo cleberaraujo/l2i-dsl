@@ -787,7 +787,8 @@ stop_netconf() {
 start_netconf() {
   local netopeer_bin
   local launcher_pid
-  local pid
+  local pid=""
+  local process_args=""
   local i
 
   if command -v netopeer2-server >/dev/null 2>&1; then
@@ -811,47 +812,65 @@ start_netconf() {
 
   sudo rm -f "$NETCONF_PIDFILE"
 
-  sudo -n nohup sh -c '
-    pidfile="$1"
-    logfile="$2"
-    shift 2
-    printf "%s\n" "$$" > "$pidfile"
-    exec "$@" > "$logfile" 2>&1
-  ' sh \
-    "$NETCONF_PIDFILE" \
-    "$NETCONF_LOG_FILE" \
+  # O sudo cria processos auxiliares de monitoramento. Portanto, o PID do
+  # launcher não é necessariamente o PID real do netopeer2-server. Iniciamos
+  # pelo método comprovadamente funcional e, após a abertura da porta 830,
+  # descobrimos o PID real pelo socket de escuta.
+  nohup sudo -n \
     "$netopeer_bin" \
     -d \
-    </dev/null >/dev/null 2>&1 &
+    > "$NETCONF_LOG_FILE" 2>&1 \
+    </dev/null &
 
   launcher_pid=$!
 
   for ((i=1; i<=50; i++)); do
-    if [[ -s "$NETCONF_PIDFILE" ]]; then
+    if port_listening "$NETCONF_PORT"; then
       break
     fi
+
+    if ! kill -0 "$launcher_pid" 2>/dev/null; then
+      break
+    fi
+
     sleep 0.1
   done
 
-  if [[ ! -s "$NETCONF_PIDFILE" ]]; then
-    err "Netopeer2 não gravou o PID file: $NETCONF_PIDFILE"
-    wait "$launcher_pid" 2>/dev/null || true
-    exit 1
-  fi
-
-  pid="$(cat "$NETCONF_PIDFILE")"
-  if ! sudo kill -0 "$pid" 2>/dev/null; then
-    err "Netopeer2 não permaneceu ativo (PID=$pid)."
-    tail -n 80 "$NETCONF_LOG_FILE" >&2 || true
-    exit 1
-  fi
-
-  sleep 2
-
-  port_listening "$NETCONF_PORT" || {
+  if ! port_listening "$NETCONF_PORT"; then
     err "NETCONF não abriu a porta $NETCONF_PORT. Verifique $NETCONF_LOG_FILE"
+    tail -n 80 "$NETCONF_LOG_FILE" >&2 || true
+    stop_netconf
     exit 1
-  }
+  fi
+
+  pid="$(
+    sudo ss -H -ltnp "sport = :$NETCONF_PORT" 2>/dev/null \
+      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+      | head -n 1
+  )"
+
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] \
+     || ! sudo kill -0 "$pid" 2>/dev/null; then
+    err "Não foi possível identificar o PID real do Netopeer2 na porta $NETCONF_PORT."
+    tail -n 80 "$NETCONF_LOG_FILE" >&2 || true
+    stop_netconf
+    exit 1
+  fi
+
+  process_args="$(
+    sudo ps -p "$pid" -o args= 2>/dev/null || true
+  )"
+
+  if [[ "$process_args" != *netopeer2-server* ]]; then
+    err "O PID $pid associado à porta $NETCONF_PORT não corresponde ao Netopeer2: $process_args"
+    stop_netconf
+    exit 1
+  fi
+
+  printf '%s\n' "$pid" \
+    | sudo tee "$NETCONF_PIDFILE" >/dev/null
+
+  info "Netopeer2 ativo na porta $NETCONF_PORT (PID real=$pid; launcher=$launcher_pid)."
 }
 
 # -------------------------------
