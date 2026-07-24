@@ -1000,6 +1000,7 @@ cleanup_topologies_only() {
   require_repo_layout
   run sudo "$REPO_DIR/scripts/s1_topology_cleanup.sh" || true
   run sudo "$REPO_DIR/scripts/s2_topology_cleanup.sh" || true
+  run sudo "$REPO_DIR/scripts/s2_p4_topology_cleanup.sh" || true
   run sudo "$REPO_DIR/scripts/cleanup_net.sh" || true
 }
 
@@ -1017,6 +1018,16 @@ run_python_module_as_root() {
     PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
     PATH="$VENV_DIR/bin:$PATH" \
     "$PYTHON_BIN" -m "$module" "$@"
+}
+
+run_python_script_as_root() {
+  local script="$1"
+  shift
+  sudo -E \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    PATH="$VENV_DIR/bin:$PATH" \
+    "$PYTHON_BIN" "$script" "$@"
 }
 
 run_with_cleanup_trap() {
@@ -1088,6 +1099,58 @@ run_s2_real() {
       --rtt-interval-ms "${S2_RTT_INTERVAL_MS:-50}" \
       --recovery-bin-ms "${S2_RECOVERY_BIN_MS:-500}" \
       --stable-k-bins "${S2_STABLE_K_BINS:-3}"
+}
+
+
+run_s2_p4_dataplane_smoke() {
+  require_repo_layout
+
+  local output_dir="${S2_DP_OUTPUT_DIR:-$REPO_DIR/results/S2/dataplane-smoke-$(date -u +%Y%m%dT%H%M%SZ)}"
+  local group="${S2_DP_MCAST_DST:-239.1.1.1}"
+  local group_id="${S2_DP_MCAST_GROUP_ID:-1}"
+  local udp_port="${S2_DP_UDP_PORT:-5001}"
+
+  cleanup_topologies_only
+  trap 'cleanup_topologies_only' EXIT INT TERM
+
+  run sudo "$REPO_DIR/scripts/s2_p4_topology_setup.sh"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    trap - EXIT INT TERM
+    cleanup_topologies_only
+    return 0
+  fi
+
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/p4_program_s2.py" \
+      --addr "$P4_ADDR" \
+      --device-id 0 \
+      --outdir /tmp/l2i_minimal \
+      --mgrp "$group_id" \
+      --dst-mcast "$group" \
+      --ports 1 2
+
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/s2_multicast_dataplane_smoke.py" \
+      orchestrate \
+      --group "$group" \
+      --port "$udp_port" \
+      --source-namespace h1 \
+      --source-ip 10.0.0.1 \
+      --receiver B:h3:10.0.0.3 \
+      --receiver C:h4:10.0.0.4 \
+      --duration "${S2_DP_DURATION:-3}" \
+      --rate-mbps "${S2_DP_RATE_MBPS:-2}" \
+      --packet-size "${S2_DP_PACKET_SIZE:-1200}" \
+      --min-delivery "${S2_DP_MIN_DELIVERY:-0.99}" \
+      --output-dir "$output_dir"
+
+  local rc=$?
+  echo "S2_DP_OUTPUT_DIR=$output_dir"
+
+  trap - EXIT INT TERM
+  cleanup_topologies_only
+  return "$rc"
 }
 
 # -------------------------------
@@ -1186,6 +1249,7 @@ Ações internas úteis:
   build_bmv2
   build_p4c
   push_p4_pipeline
+  run_s2_p4_dataplane_smoke
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1237,6 +1301,7 @@ case "${1:-}" in
   run_s1_real) run_s1_real ;;
   run_s1_mock) run_s1_mock ;;
   run_s2_real) run_s2_real ;;
+  run_s2_p4_dataplane_smoke) run_s2_p4_dataplane_smoke ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;

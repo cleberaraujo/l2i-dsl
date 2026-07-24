@@ -8,10 +8,15 @@ fi
 
 echo "[CLEANUP] Iniciando limpeza seletiva de namespaces e interfaces L2I..."
 
-# veth0/veth1 pertencem ao serviço persistente BMv2. A limpeza de topologias
+# veth0..veth3 pertencem ao serviço persistente BMv2. A limpeza de topologias
 # de cenário nunca deve removê-las. O ciclo de vida dessas interfaces é tratado
 # exclusivamente por p4_build_and_run.sh / p4_stop.sh.
-readonly -a PROTECTED_IFACES=(veth0 veth0-peer veth1 veth1-peer)
+readonly -a PROTECTED_IFACES=(
+  veth0 veth0-peer
+  veth1 veth1-peer
+  veth2 veth2-peer
+  veth3 veth3-peer
+)
 
 is_protected_iface() {
   local candidate="$1"
@@ -57,7 +62,7 @@ done
 
 # Bridges conhecidas. Não há descoberta genérica de bridges para evitar tocar
 # em dispositivos externos ao artefato.
-for br in brA brB brC br-s1 br-s2 brs2; do
+for br in brA brB brC br-s1 br-s2 brs2 p4s2b0 p4s2b1 p4s2b2 p4s2b3; do
   delete_link_if_present "$br"
 done
 
@@ -70,6 +75,7 @@ readonly -a KNOWN_IFACES=(
   h1-eth0-br h2-eth0-br h3-eth0-br h4-eth0-br h5-eth0-br
   veth-br-h1 veth-br-h2 veth-br-h3 veth-br-h4 veth-br-h5
   l2itc-host
+  s2b-h1 s2b-h2 s2b-h3 s2b-h4
 )
 
 for dev in "${KNOWN_IFACES[@]}"; do
@@ -78,7 +84,7 @@ done
 
 # Descoberta residual restrita a padrões pertencentes ao artefato. A antiga
 # regra baseada em '@' alcançava todo par veth do host e, por isso, removia
-# indevidamente veth0/veth1 do BMv2.
+# indevidamente as interfaces persistentes do BMv2.
 mapfile -t residual_ifaces < <(
   ip -o link show \
     | awk -F': ' '{print $2}' \
@@ -88,7 +94,9 @@ mapfile -t residual_ifaces < <(
         /^(A|B|C)-/ ||
         /^h[0-9]+-eth[0-9]+-br$/ ||
         /^veth-br-h[0-9]+$/ ||
-        /^l2itc-/
+        /^l2itc-/ ||
+        /^s2b-h[1-4]$/ ||
+        /^p4s2b[0-3]$/
       ' \
     | sort -u
 )

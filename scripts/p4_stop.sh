@@ -69,8 +69,9 @@ as_root rm -f "$PIDFILE"
 
 if [[ "$REMOVE_LINKS" -eq 1 ]]; then
   echo "[stop] Removendo interfaces persistentes do BMv2."
-  for dev in veth0 veth0-peer veth1 veth1-peer; do
-    as_root ip link del "$dev" 2>/dev/null || true
+  for port in 0 1 2 3; do
+    as_root ip link del "veth${port}" 2>/dev/null || true
+    as_root ip link del "veth${port}-peer" 2>/dev/null || true
   done
 fi
 

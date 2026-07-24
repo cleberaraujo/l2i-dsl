@@ -37,53 +37,61 @@ p4c-bm2-ss \
 echo "[ok] JSON:   ${JSON}"
 echo "[ok] P4INFO: ${P4INFO}"
 
-# Cada porta do BMv2 usa um par veth independente. Conectar as duas pontas do
-# mesmo par ao switch cria um circuito de camada 2 e pode gerar tráfego infinito.
-# As pontas *-peer permanecem isoladas e existem apenas para manter os links.
+# Cada porta do BMv2 usa um par veth independente. Quatro portas são mantidas
+# para o S2: source (0), receiver B (1), receiver C (2) e tráfego de suporte (3).
+readonly -a P4_PORT_IDS=(0 1 2 3)
+
 ensure_independent_p4_links() {
   local complete=1
-  local dev
+  local port dev peer
 
-  for dev in veth0 veth0-peer veth1 veth1-peer; do
-    if ! ip link show "$dev" >/dev/null 2>&1; then
+  for port in "${P4_PORT_IDS[@]}"; do
+    dev="veth${port}"
+    peer="veth${port}-peer"
+    if ! ip link show "$dev" >/dev/null 2>&1 \
+       || ! ip link show "$peer" >/dev/null 2>&1; then
       complete=0
       break
     fi
   done
 
   if [[ "$complete" -eq 1 ]]; then
-    echo "[net] pares independentes do BMv2 já existem (ok)"
+    echo "[net] quatro pares independentes do BMv2 já existem (ok)"
     return 0
   fi
 
-  echo "[net] recriando pares independentes veth0/veth0-peer e veth1/veth1-peer"
+  echo "[net] recriando quatro pares independentes do BMv2"
 
-  for dev in veth0 veth0-peer veth1 veth1-peer; do
-    as_root ip link del "$dev" 2>/dev/null || true
+  for port in "${P4_PORT_IDS[@]}"; do
+    as_root ip link del "veth${port}" 2>/dev/null || true
+    as_root ip link del "veth${port}-peer" 2>/dev/null || true
   done
 
-  as_root ip link add veth0 type veth peer name veth0-peer
-  as_root ip link add veth1 type veth peer name veth1-peer
+  for port in "${P4_PORT_IDS[@]}"; do
+    as_root ip link add "veth${port}" type veth peer name "veth${port}-peer"
+  done
 }
+
+# Encerra a instância anterior antes de alterar as interfaces usadas por ela.
+as_root "$SCRIPT_DIR/p4_stop.sh" >/dev/null 2>&1 || true
+as_root rm -f "$PIDFILE"
 
 ensure_independent_p4_links
 
-for dev in veth0 veth0-peer veth1 veth1-peer; do
-  as_root ip link set "$dev" up
+for port in "${P4_PORT_IDS[@]}"; do
+  as_root ip link set "veth${port}" up
+  as_root ip link set "veth${port}-peer" up
 done
 
-# Encerra instâncias anteriores, remove PID files obsoletos e começa com um log
-# vazio. O rastreamento por pacote (--log-console) fica desabilitado por padrão.
-as_root "$SCRIPT_DIR/p4_stop.sh" >/dev/null 2>&1 || true
-as_root rm -f "$PIDFILE"
+# Começa com um log vazio. O rastreamento por pacote (--log-console) fica
+# desabilitado por padrão.
 : > "$LOG"
 
-bmv2_cmd=(
-  simple_switch_grpc
-  -i 0@veth0
-  -i 1@veth1
-  --device-id 0
-)
+bmv2_cmd=(simple_switch_grpc)
+for port in "${P4_PORT_IDS[@]}"; do
+  bmv2_cmd+=("-i" "${port}@veth${port}")
+done
+bmv2_cmd+=(--device-id 0)
 
 if [[ "$REQUIRE_THRIFT" == "1" ]]; then
   bmv2_cmd+=(--thrift-port "$THRIFT_PORT")
