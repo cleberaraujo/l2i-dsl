@@ -204,37 +204,96 @@ def parse_iperf3_mbps(path: Path) -> float | None:
     except Exception:
         return None
 
-# ----------- TC (Domínio A) -----------
-
-def tc_apply_h1(rate_mbps: float, ns: str, dev: str) -> Dict[str, Any]:
-    cmds: List[List[str]] = []
-
-    def _r(c: List[str], check: bool = True):
-        cmds.append(c)
-        run(c, check=check, ns=ns)
-
-    # Baseline-friendly: sempre recria de forma idempotente
-    _r(["tc", "qdisc", "del", "dev", dev, "root"], check=False)
-    _r(["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb"])
-    _r(["tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb",
-        "rate", f"{int(rate_mbps)}mbit", "ceil", f"{int(rate_mbps)}mbit"])
-    # classe default (1:10) para marcar tráfego do flow (ICMP/TCP) no experimento
-    _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", "1:10", "htb",
-        "rate", f"{int(rate_mbps)}mbit", "ceil", f"{int(rate_mbps)}mbit"])
-    _r(["tc", "filter", "add", "dev", dev, "protocol", "ip", "parent", "1:", "prio", "2",
-        "u32", "match", "ip", "protocol", "1", "0xff", "flowid", "1:10"], check=False)
-
-    qdisc = run(["tc", "qdisc", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-    classes = run(["tc", "class", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-    filters = run(["tc", "filter", "show", "dev", dev, "parent", "1:"], check=False, capture=True, ns=ns) or ""
-    return {
-        "commands": [" ".join(c) for c in cmds],
-        "readback": {"qdisc": qdisc.strip(), "class": classes.strip(), "filter": filters.strip()},
-    }
-
-# ----------- Backends (B/C) -----------
+# ----------- Backends (A/B/C) -----------
 
 from l2i.backends.router import get_backends  # noqa: E402
+
+
+def _backend_failure_message(details: Any) -> str:
+    if isinstance(details, dict):
+        error = details.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error)
+        if error:
+            return str(error)
+    return str(details)
+
+
+def _apply_domain_a_backend(
+    mod: Any,
+    *,
+    rate_mbps: float,
+    ns: str,
+    dev: str,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Materializa o domínio A exclusivamente por meio do backend Linux TC.
+
+    O cenário preserva apenas a orquestração metodológica. A construção e a
+    execução dos comandos ``tc`` ficam centralizadas no backend.
+    """
+
+    target = {
+        "namespace": ns,
+        "device": dev,
+        "dry_run": dry_run,
+        "filter_protocol": "icmp",
+        "filter_priority": 2,
+        "attach_priority_netem": False,
+        "idempotent_cleanup": False,
+    }
+
+    setup = getattr(mod, "setup_environment")
+    apply = getattr(mod, "apply_qos")
+
+    env_ok, env = setup(
+        {"name": "A"},
+        {
+            "bw_mbps": rate_mbps,
+            "create_default_class": False,
+        },
+        target,
+    )
+    if not env_ok:
+        raise RuntimeError(
+            "Linux TC environment setup failed: "
+            + _backend_failure_message(env)
+        )
+
+    qos_ok, qos = apply(
+        {"name": "A"},
+        {
+            "class": "prio10",
+            "min_mbps": rate_mbps,
+            "max_mbps": rate_mbps,
+        },
+        target,
+    )
+    if not qos_ok:
+        raise RuntimeError(
+            "Linux TC QoS application failed: "
+            + _backend_failure_message(qos)
+        )
+
+    commands = [
+        *(env.get("planned", {}).get("cmds", []) or []),
+        *(qos.get("planned", {}).get("cmds", []) or []),
+    ]
+    readback = qos.get("readback", {}) or {}
+
+    return {
+        "commands": list(commands),
+        "readback": {
+            "qdisc": str(readback.get("qdisc", "")),
+            "class": str(readback.get("class", "")),
+            "filter": str(readback.get("filter", "")),
+        },
+        "backend_details": {
+            "environment": env,
+            "qos": qos,
+        },
+        "simulated": bool(dry_run),
+    }
 
 def _call_apply_qos(mod: Any,
                     domain_ctx: Dict[str, Any],
@@ -353,6 +412,7 @@ def main() -> None:
 
     # --- backends and targets ---
     backends = get_backends(args.backend)
+    A_mod = backends.get("A")
     B_mods = backends.get("B")
     C_mods = backends.get("C")
 
@@ -465,10 +525,18 @@ def main() -> None:
     # Em S1, tc é parte do AMBIENTE: aplicamos tanto em baseline quanto em adapt para garantir
     # que o testbed reflita bwA_mbps, sem confundir com "adaptação" (que é B/C).
     try:
-        evA = tc_apply_h1(rate_mbps=args.bwA, ns=ns_src, dev=f"{ns_src}-eth0")
+        if A_mod is None:
+            raise RuntimeError("Domain A backend was not provided by router")
+        evA = _apply_domain_a_backend(
+            A_mod,
+            rate_mbps=args.bwA,
+            ns=ns_src,
+            dev=f"{ns_src}-eth0",
+        )
         domA_info["applied"] = True
         domA_info["commands"] = evA["commands"]
         domA_info["readback"] = evA["readback"]
+        domA_info["backend_details"] = evA.get("backend_details")
         tc_dump_A.write_text(
             "### tc qdisc\n" + (evA["readback"].get("qdisc") or "") +
             "\n\n### tc class\n" + (evA["readback"].get("class") or "") +

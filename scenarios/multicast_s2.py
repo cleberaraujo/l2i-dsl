@@ -250,107 +250,6 @@ def parse_iperf3_mbps(path: Path) -> float | None:
         return None
 
 
-# ------------- TC (Domínio A) -------------
-
-def tc_apply_h1(min_mbps: float,
-                max_mbps: float,
-                ns: str,
-                dev: str,
-                prio_cls: str,
-                delay_ms: float,
-                be_port: int,
-                overlay: bool,
-                dry_run: bool = False) -> Dict[str, Any]:
-    """
-    Domínio A (Linux tc/htb) com separação científica:
-
-    - "ambiente" (sempre): limita a capacidade do link no testbed e aplica delay controlado.
-      Isso garante que baseline e adapt rodem no MESMO ambiente.
-
-    - "overlay" (somente em adapt): adiciona classificação (filter) e classe específica
-      para evidenciar impacto/custo da adaptação (mudanças adicionais + tempo de controle).
-
-    Parâmetros:
-    - min_mbps/max_mbps: aqui representam o envelope do AMBIENTE (cap do domínio A).
-      (é proposital: não vem do spec; vem do operador via --bwA).
-    - delay_ms: também do ambiente (--delay-ms)
-    - overlay=True: aplica classe/filtro adicional (relacionada ao tráfego do experimento)
-    - be_port: porta do iperf3 (para filtro TCP dport)
-
-    Retorno:
-    - commands: comandos executados (ordem preservada)
-    - readback: dumps de qdisc/class/filter
-    - timing_ms: tempo de controle (ms) gasto no domínio A
-    - overlay_applied: bool
-    """
-    t0 = _now_ms()
-    cmds: List[List[str]] = []
-
-    def _r(c: List[str], check: bool = True):
-        cmds.append(c)
-        if not dry_run:
-            run(c, check=check, ns=ns)
-
-    # Reset
-    _r(["tc", "qdisc", "del", "dev", dev, "root"], check=False)
-
-    # Root HTB
-    _r(["tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb", "default", "30"])
-
-    # Classe raiz (cap do link no testbed)
-    bw = int(max_mbps)
-    _r(["tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb",
-        "rate", f"{bw}mbit", "ceil", f"{bw}mbit"])
-
-    # "classe default" (para tráfego que não será classificado no overlay)
-    _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", "1:30", "htb",
-        "rate", f"{bw}mbit", "ceil", f"{bw}mbit"])
-
-    # Aplica netem como condição AMBIENTAL (igual em baseline e adapt)
-    # Observação: attach em 1:30 (default) para não exigir overlay.
-    _r(["tc", "qdisc", "add", "dev", dev, "parent", "1:30", "handle", "30:", "netem",
-        "delay", f"{delay_ms}ms"], check=False)
-
-    overlay_applied = False
-
-    if overlay:
-        # Classe "prioritária" (aqui usamos o MESMO envelope do ambiente, mas numa classe separada)
-        # Isso permite observar:
-        # - mais comandos
-        # - alteração de estado no readback
-        # - custo de controle (timing_ms)
-        _r(["tc", "class", "add", "dev", dev, "parent", "1:1", "classid", f"1:{prio_cls}", "htb",
-            "rate", f"{int(min_mbps)}mbit", "ceil", f"{int(max_mbps)}mbit"])
-
-        # netem também na classe priorizada (mesma condição ambiental, para isolar custo de controle)
-        _r(["tc", "qdisc", "add", "dev", dev, "parent", f"1:{prio_cls}", "handle", f"{prio_cls}:", "netem",
-            "delay", f"{delay_ms}ms"], check=False)
-
-        # Filtro: classifica o TCP dport do iperf (5201) na classe priorizada.
-        # Isso faz o overlay "ter efeito" sem inventar tráfego extra.
-        _r(["tc", "filter", "add", "dev", dev, "protocol", "ip", "parent", "1:", "prio", "1",
-            "u32", "match", "ip", "protocol", "6", "0xff",
-            "match", "ip", "dport", str(be_port), "0xffff",
-            "flowid", f"1:{prio_cls}"])
-
-        overlay_applied = True
-
-    if dry_run:
-        qdisc, classes, filters = "", "", ""
-    else:
-        qdisc = run(["tc", "qdisc", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-        classes = run(["tc", "class", "show", "dev", dev], check=False, capture=True, ns=ns) or ""
-        filters = run(["tc", "filter", "show", "dev", dev, "parent", "1:"], check=False, capture=True, ns=ns) or ""
-
-    t1 = _now_ms()
-    return {
-        "commands": [" ".join(c) for c in cmds],
-        "readback": {"qdisc": qdisc.strip(), "class": classes.strip(), "filter": filters.strip()},
-        "timing_ms": t1 - t0,
-        "overlay_applied": overlay_applied,
-    }
-
-
 # ------------- backends dinâmicos (A/B/C) -------------
 
 from l2i.backends.router import get_backends  # noqa: E402
@@ -493,10 +392,12 @@ def main() -> None:
     ip_C = host_ip.get(ns_C, "10.0.0.4")
 
     # --- backends e targets ---
+    A_mod = None
     B_mods = None
     C_mods = None
     if args.mode == "adapt":
         backends = get_backends(args.backend)
+        A_mod = backends["A"]
         B_mods = backends["B"]
         C_mods = backends["C"]
 
@@ -611,7 +512,10 @@ def main() -> None:
         # Nota: o "ambiente" usa bwA; não vem do spec.
         # Em mock, simulamos (não aplicamos), mas registramos o plano de comandos.
         dry_run = (args.backend != "real")
-        evA = tc_apply_h1(
+        if A_mod is None:
+            raise RuntimeError("Domain A backend was not provided by router")
+        tc_apply = getattr(A_mod, "tc_apply_h1")
+        evA = tc_apply(
             min_mbps=args.bwA,
             max_mbps=args.bwA,
             ns=ns_src,
@@ -627,6 +531,7 @@ def main() -> None:
         domA_info["timing_ms"] = int(evA.get("timing_ms", 0))
         domA_info["commands"] = evA.get("commands", [])
         domA_info["readback"] = evA.get("readback", {})
+        domA_info["backend_details"] = evA.get("backend_details")
         domA_info["simulated"] = bool(dry_run)
 
         # SUBSTIUI ESTE TRECHO COMENTADO PELAS LINHAS 638 a 652
