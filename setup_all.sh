@@ -1457,6 +1457,12 @@ run_s2_multidomain_autonomous_assurance() {
       --group-id "${S2_MULTIDOMAIN_ASSURANCE_GROUP_ID:-1}" \
       --multicast-ports 1 2 \
       --multicast-port "${S2_MULTIDOMAIN_ASSURANCE_MULTICAST_PORT:-5001}" \
+      --observer-election-low "${S2_MULTIDOMAIN_ASSURANCE_OBSERVER_ELECTION_LOW:-17100}" \
+      --injector-election-low "${S2_MULTIDOMAIN_ASSURANCE_INJECTOR_ELECTION_LOW:-17110}" \
+      --initial-cleanup-election-low "${S2_MULTIDOMAIN_ASSURANCE_INITIAL_CLEANUP_ELECTION_LOW:-17180}" \
+      --initial-program-election-low "${S2_MULTIDOMAIN_ASSURANCE_INITIAL_PROGRAM_ELECTION_LOW:-17190}" \
+      --remediation-election-low "${S2_MULTIDOMAIN_ASSURANCE_REMEDIATION_ELECTION_LOW:-17120}" \
+      --cleanup-election-low "${S2_MULTIDOMAIN_ASSURANCE_CLEANUP_ELECTION_LOW:-17990}" \
       --qos-class "${S2_MULTIDOMAIN_ASSURANCE_QOS_CLASS:-prio10}" \
       --capacity-mbps "${S2_MULTIDOMAIN_ASSURANCE_CAPACITY_MBPS:-3}" \
       --minimum-mbps "${S2_MULTIDOMAIN_ASSURANCE_MINIMUM_MBPS:-2}" \

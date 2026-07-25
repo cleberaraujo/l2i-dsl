@@ -1050,6 +1050,29 @@ def orchestrate(args: argparse.Namespace) -> int:
     if not initial_netopeer_pids:
         fail("Netopeer2 process was not found")
 
+    first_remediation_election_low = (
+        args.remediation_election_low
+        + 101
+    )
+    election_plan = (
+        args.observer_election_low,
+        args.injector_election_low,
+        args.initial_cleanup_election_low,
+        args.initial_program_election_low,
+        first_remediation_election_low,
+        args.cleanup_election_low,
+    )
+    election_plan_is_strictly_increasing = (
+        election_plan == tuple(sorted(election_plan))
+        and len(set(election_plan)) == len(election_plan)
+    )
+    if not election_plan_is_strictly_increasing:
+        fail(
+            "invalid P4Runtime election plan: expected strictly increasing "
+            "observer, injector, initial-cleanup, initial-program, "
+            "first-remediation, cleanup IDs"
+        )
+
     context = P4Context(args)
     linux: LinuxTCAssuranceAdapter | None = None
     netconf: NetconfQosAssuranceAdapter | None = None
@@ -1097,11 +1120,37 @@ def orchestrate(args: argparse.Namespace) -> int:
                 election_low=args.initial_program_election_low,
             ),
         }
-        if not all(
-            (initial_materialization[domain] or {}).get("accepted") is True
+
+        # Preserve per-domain evidence before enforcing the aggregate gate. This
+        # keeps deterministic startup failures attributable to the exact domain
+        # instead of collapsing them into one generic orchestration message.
+        dump_json(
+            output_dir / "initial-materialization.json",
+            initial_materialization,
+        )
+
+        failed_initial_domains = [
+            domain
             for domain in ("A", "B", "C")
-        ):
-            fail("initial multi-domain materialization failed")
+            if (
+                (initial_materialization[domain] or {}).get("accepted")
+                is not True
+            )
+        ]
+
+        for domain in ("A", "B", "C"):
+            accepted = (
+                (initial_materialization[domain] or {}).get("accepted") is True
+            )
+            print(
+                f"PHASE17_INITIAL_MATERIALIZATION_{domain}_ACCEPTED={accepted}"
+            )
+
+        if failed_initial_domains:
+            fail(
+                "initial multi-domain materialization failed: domains="
+                + ",".join(failed_initial_domains)
+            )
 
         bindings = (
             DomainAssuranceBinding(
@@ -1714,8 +1763,8 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument("--assurance-recovery-timeout-s", type=float, default=8.0)
     orchestrator.add_argument("--assurance-stop-timeout-s", type=float, default=3.0)
     orchestrator.add_argument("--assurance-maximum-runtime-s", type=float, default=30.0)
-    orchestrator.add_argument("--initial-cleanup-election-low", type=int, default=17080)
-    orchestrator.add_argument("--initial-program-election-low", type=int, default=17090)
+    orchestrator.add_argument("--initial-cleanup-election-low", type=int, default=17180)
+    orchestrator.add_argument("--initial-program-election-low", type=int, default=17190)
     orchestrator.add_argument("--observer-election-low", type=int, default=17100)
     orchestrator.add_argument("--remediation-election-low", type=int, default=17120)
     orchestrator.add_argument("--cleanup-election-low", type=int, default=17990)
