@@ -1365,6 +1365,7 @@ run_s2_p4_autonomous_assurance() {
       --control-port "$control_port" \
       --duration "${S2_ASSURANCE_DURATION:-12}" \
       --fault-after-s "${S2_ASSURANCE_FAULT_AFTER_S:-4}" \
+      --fault-kind "${S2_ASSURANCE_FAULT_KIND:-both}" \
       --minimum-post-s "${S2_ASSURANCE_MINIMUM_POST_S:-5}" \
       --window-guard-s "${S2_ASSURANCE_WINDOW_GUARD_S:-0.25}" \
       --multicast-rate-mbps "${S2_ASSURANCE_MULTICAST_RATE_MBPS:-2}" \
@@ -1386,6 +1387,7 @@ run_s2_p4_autonomous_assurance() {
       --assurance-drift-confirmations "${S2_ASSURANCE_DRIFT_CONFIRMATIONS:-3}" \
       --assurance-convergence-confirmations "${S2_ASSURANCE_CONVERGENCE_CONFIRMATIONS:-2}" \
       --assurance-maximum-remediation-attempts "${S2_ASSURANCE_MAX_REMEDIATION_ATTEMPTS:-3}" \
+      --assurance-forced-remediation-rejections "${S2_ASSURANCE_FORCED_REMEDIATION_REJECTIONS:-0}" \
       --assurance-initial-backoff-s "${S2_ASSURANCE_INITIAL_BACKOFF_S:-0.01}" \
       --assurance-backoff-multiplier "${S2_ASSURANCE_BACKOFF_MULTIPLIER:-2}" \
       --assurance-maximum-backoff-s "${S2_ASSURANCE_MAX_BACKOFF_S:-0.10}" \
@@ -1411,6 +1413,18 @@ run_s2_p4_autonomous_assurance_foundation() {
   run \
     "$REPO_DIR/scripts/run_s2_p4_autonomous_assurance_foundation.sh" \
     "${PHASE16_FOUNDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/autonomous-assurance-foundation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
+
+run_s2_p4_autonomous_assurance_validation() {
+  require_repo_layout
+
+  # Exercise a mirrored matrix that includes a no-fault control, selective
+  # component drift, and a bounded synthetic remediation rejection. The runner
+  # verifies exact classification, exact component reapply, retry, and backoff.
+  run \
+    "$REPO_DIR/scripts/run_s2_p4_autonomous_assurance_validation.sh" \
+    "${PHASE16_VALIDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/autonomous-assurance-validation-$(date -u +%Y%m%dT%H%M%SZ)}"
 }
 
 
@@ -1554,6 +1568,7 @@ Ações internas úteis:
   run_s2_p4_state_recovery_validation
   run_s2_p4_autonomous_assurance
   run_s2_p4_autonomous_assurance_foundation
+  run_s2_p4_autonomous_assurance_validation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1613,6 +1628,7 @@ case "${1:-}" in
   run_s2_p4_state_recovery_validation) run_s2_p4_state_recovery_validation ;;
   run_s2_p4_autonomous_assurance) run_s2_p4_autonomous_assurance ;;
   run_s2_p4_autonomous_assurance_foundation) run_s2_p4_autonomous_assurance_foundation ;;
+  run_s2_p4_autonomous_assurance_validation) run_s2_p4_autonomous_assurance_validation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;

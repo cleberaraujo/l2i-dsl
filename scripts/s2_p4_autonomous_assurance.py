@@ -155,6 +155,7 @@ class P4MulticastAssuranceAdapter:
         dst_ip: str,
         pre_entity: p4runtime_pb2.Entity,
         table_entity: p4runtime_pb2.Entity,
+        forced_remediation_rejections: int = 0,
     ) -> None:
         self.p4_addr = p4_addr
         self.device_id = device_id
@@ -169,6 +170,10 @@ class P4MulticastAssuranceAdapter:
         self.dst_ip = dst_ip
         self.pre_entity = pre_entity
         self.table_entity = table_entity
+        if forced_remediation_rejections < 0:
+            raise ValueError("forced_remediation_rejections cannot be negative")
+        self.forced_remediation_rejections = int(forced_remediation_rejections)
+        self._remaining_forced_rejections = int(forced_remediation_rejections)
         self.observer = P4RTClient(
             address=p4_addr,
             device_id=device_id,
@@ -236,6 +241,25 @@ class P4MulticastAssuranceAdapter:
             + incident_id * 100
             + attempt
         )
+
+        # Validation can request a bounded synthetic backend rejection. This
+        # exercises the generic retry and backoff state machine without sharing
+        # the independent fault schedule with the assurance controller.
+        if self._remaining_forced_rejections > 0:
+            self._remaining_forced_rejections -= 1
+            return RemediationOutcome(
+                accepted=False,
+                details={
+                    "election_low": election_low,
+                    "forced_test_rejection": True,
+                    "remaining_forced_rejections": (
+                        self._remaining_forced_rejections
+                    ),
+                    "incident_id": incident_id,
+                    "attempt": attempt,
+                    "drift_kinds": list(observation.drift_kinds),
+                },
+            )
         client = P4RTClient(
             address=self.p4_addr,
             device_id=self.device_id,
@@ -379,8 +403,111 @@ def program_initial_state(
         client.close()
 
 
+def expected_fault_state(fault_kind: str) -> dict[str, bool]:
+    """Return the expected multicast component presence after one fault."""
+
+    states = {
+        "none": {
+            "group_present": True,
+            "entry_present": True,
+        },
+        "pre_only": {
+            "group_present": False,
+            "entry_present": True,
+        },
+        "table_only": {
+            "group_present": True,
+            "entry_present": False,
+        },
+        "both": {
+            "group_present": False,
+            "entry_present": False,
+        },
+    }
+    try:
+        return states[fault_kind]
+    except KeyError as exc:
+        raise ValueError(f"unsupported fault kind: {fault_kind}") from exc
+
+
+def expected_drift_kinds(fault_kind: str) -> set[str]:
+    """Map one selective state fault to its exact assurance classification."""
+
+    mapping = {
+        "none": set(),
+        "pre_only": {"missing_pre_multicast_group"},
+        "table_only": {"missing_multicast_table_entry"},
+        "both": {
+            "missing_pre_multicast_group",
+            "missing_multicast_table_entry",
+        },
+    }
+    try:
+        return set(mapping[fault_kind])
+    except KeyError as exc:
+        raise ValueError(f"unsupported fault kind: {fault_kind}") from exc
+
+
+def expected_remediation_components(fault_kind: str) -> set[str]:
+    """Map one fault to the component upserts required for convergence."""
+
+    mapping = {
+        "none": set(),
+        "pre_only": {"pre_multicast_group"},
+        "table_only": {"multicast_table_entry"},
+        "both": {
+            "pre_multicast_group",
+            "multicast_table_entry",
+        },
+    }
+    try:
+        return set(mapping[fault_kind])
+    except KeyError as exc:
+        raise ValueError(f"unsupported fault kind: {fault_kind}") from exc
+
+
+def wait_for_fault_state(
+    client: P4RTClient,
+    *,
+    fault_kind: str,
+    timeout_s: float,
+    poll_interval_s: float,
+    state_kwargs: dict[str, Any],
+) -> tuple[bool, dict[str, Any], int]:
+    """Poll until the exact component-selective fault state is observed."""
+
+    expected = expected_fault_state(fault_kind)
+    deadline = time.monotonic() + timeout_s
+    polls = 0
+    last: dict[str, Any] = {}
+
+    while time.monotonic() < deadline:
+        polls += 1
+        last = multicast_state_readback(client, **state_kwargs)
+        if (
+            last.get("read_ok") is True
+            and bool(last.get("group_present"))
+            is expected["group_present"]
+            and bool(last.get("entry_present"))
+            is expected["entry_present"]
+        ):
+            return True, last, polls
+        time.sleep(poll_interval_s)
+
+    polls += 1
+    last = multicast_state_readback(client, **state_kwargs)
+    matched = bool(
+        last.get("read_ok") is True
+        and bool(last.get("group_present"))
+        is expected["group_present"]
+        and bool(last.get("entry_present"))
+        is expected["entry_present"]
+    )
+    return matched, last, polls
+
+
 def inject_fault(args: argparse.Namespace) -> int:
-    """Delete multicast state in an independent process after a file barrier."""
+    """Apply one independent component-selective fault after a file barrier."""
 
     output_path = Path(args.output)
     barrier_path = Path(args.start_barrier)
@@ -432,49 +559,87 @@ def inject_fault(args: argparse.Namespace) -> int:
         if not arbitration.ok or not arbitration.is_primary:
             fail(f"fault injector arbitration failed: {arbitration.message}")
 
+        pre_readback = multicast_state_readback(client, **state_kwargs)
+        updates: list[p4runtime_pb2.Update] = []
+        deleted_components: list[str] = []
+
+        if args.fault_kind in {"table_only", "both"}:
+            if pre_readback.get("entry_present") is not True:
+                fail("multicast table entry was absent before fault injection")
+            updates.append(
+                update_message(p4runtime_pb2.Update.DELETE, table_delete)
+            )
+            deleted_components.append("multicast_table_entry")
+
+        if args.fault_kind in {"pre_only", "both"}:
+            if pre_readback.get("group_present") is not True:
+                fail("PRE multicast group was absent before fault injection")
+            updates.append(
+                update_message(p4runtime_pb2.Update.DELETE, pre_delete)
+            )
+            deleted_components.append("pre_multicast_group")
+
         write_started_ns = time.monotonic_ns()
-        write_ok, write_message = client.write(
-            [
-                update_message(p4runtime_pb2.Update.DELETE, table_delete),
-                update_message(p4runtime_pb2.Update.DELETE, pre_delete),
-            ]
-        )
+        if updates:
+            write_ok, write_message = client.write(updates)
+        else:
+            write_ok, write_message = True, "no-fault control: no P4 write"
         write_completed_ns = time.monotonic_ns()
         if not write_ok:
             fail(f"fault injection write failed: {write_message}")
 
-        absence_ok, absence_readback, absence_polls = wait_for_multicast_state(
+        effect_ok, effect_readback, effect_polls = wait_for_fault_state(
             client,
-            expected_present=False,
+            fault_kind=args.fault_kind,
             timeout_s=args.state_readback_timeout_s,
             poll_interval_s=args.state_poll_interval_s,
             state_kwargs=state_kwargs,
         )
-        absence_confirmed_ns = int(
-            absence_readback.get("observed_monotonic_ns") or time.monotonic_ns()
+        effect_confirmed_ns = int(
+            effect_readback.get("observed_monotonic_ns")
+            or time.monotonic_ns()
+        )
+        absence_confirmed = bool(
+            args.fault_kind != "none" and effect_ok
         )
         evidence = {
             "fault_source": "independent_p4runtime_subprocess",
+            "fault_kind": args.fault_kind,
+            "fault_injected": args.fault_kind != "none",
             "controller_notification_sent": False,
             "start_barrier": str(barrier_path),
             "barrier_observed_monotonic_ns": barrier_observed_ns,
             "configured_delay_s": args.delay_s,
+            "pre_fault_readback": pre_readback,
+            "deleted_components": deleted_components,
+            "write_update_count": len(updates),
             "write_started_monotonic_ns": write_started_ns,
             "write_completed_monotonic_ns": write_completed_ns,
             "write_ok": write_ok,
             "write_message": write_message,
-            "absence_confirmed": absence_ok,
-            "absence_confirmed_monotonic_ns": absence_confirmed_ns,
-            "absence_poll_count": absence_polls,
-            "absence_readback": absence_readback,
+            "fault_effect_confirmed": effect_ok,
+            "fault_effect_confirmed_monotonic_ns": effect_confirmed_ns,
+            "fault_effect_poll_count": effect_polls,
+            "fault_effect_readback": effect_readback,
+            # Preserve the original foundation fields for backward-compatible
+            # evidence validation when the default combined fault is used.
+            "absence_confirmed": absence_confirmed,
+            "absence_confirmed_monotonic_ns": effect_confirmed_ns,
+            "absence_poll_count": effect_polls,
+            "absence_readback": effect_readback,
             "election_low": args.election_low,
         }
         dump_json(output_path, evidence)
+        print(f"PHASE16_FAULT_INJECTOR_KIND={args.fault_kind}")
         print(f"PHASE16_FAULT_INJECTOR_WRITE_OK={write_ok}")
-        print(f"PHASE16_FAULT_INJECTOR_ABSENCE_CONFIRMED={absence_ok}")
+        print(f"PHASE16_FAULT_INJECTOR_EFFECT_CONFIRMED={effect_ok}")
+        print(
+            "PHASE16_FAULT_INJECTOR_ABSENCE_CONFIRMED="
+            f"{absence_confirmed}"
+        )
         print("PHASE16_FAULT_INJECTOR_CONTROLLER_NOTIFICATION_SENT=False")
         print(f"PHASE16_FAULT_INJECTOR_EVIDENCE={output_path}")
-        if not absence_ok:
+        if not effect_ok:
             return 1
         print("PHASE16_INDEPENDENT_FAULT_INJECTOR_OK")
         return 0
@@ -506,10 +671,18 @@ def orchestrate(args: argparse.Namespace) -> int:
     control_dir = output_dir / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.duration <= args.fault_after_s + args.minimum_post_s:
+    fault_expected = args.fault_kind != "none"
+    if fault_expected and args.duration <= args.fault_after_s + args.minimum_post_s:
         fail("duration must leave the configured minimum post-recovery interval")
     if args.fault_after_s <= args.window_guard_s:
         fail("fault-after interval must exceed the measurement guard")
+    if args.assurance_forced_remediation_rejections < 0:
+        fail("forced remediation rejections cannot be negative")
+    if (
+        not fault_expected
+        and args.assurance_forced_remediation_rejections != 0
+    ):
+        fail("no-fault control cannot request remediation rejection")
 
     multicast_cpu = resolve_cpu(args.multicast_sender_cpu, role="multicast sender")
     control_cpu = resolve_cpu(
@@ -644,6 +817,9 @@ def orchestrate(args: argparse.Namespace) -> int:
         dst_ip=args.group,
         pre_entity=pre_entity,
         table_entity=mcast_table_entity(mcast_entry),
+        forced_remediation_rejections=(
+            args.assurance_forced_remediation_rejections
+        ),
     )
     policy = AssurancePolicy(
         poll_interval_s=args.assurance_poll_interval_s,
@@ -779,6 +955,7 @@ def orchestrate(args: argparse.Namespace) -> int:
                 "--start-barrier", str(traffic_barrier),
                 "--barrier-timeout-s", str(args.worker_ready_timeout_s),
                 "--delay-s", str(args.fault_after_s),
+                "--fault-kind", args.fault_kind,
                 "--p4-addr", args.p4_addr,
                 "--device-id", str(args.device_id),
                 "--p4-outdir", args.p4_outdir,
@@ -849,7 +1026,7 @@ def orchestrate(args: argparse.Namespace) -> int:
         if injector_process.returncode != 0:
             fail("independent fault injector failed")
 
-        if not controller.first_recovery_event.wait(
+        if fault_expected and not controller.first_recovery_event.wait(
             args.assurance_recovery_timeout_s
         ):
             snapshot = controller.snapshot()
@@ -857,6 +1034,15 @@ def orchestrate(args: argparse.Namespace) -> int:
                 "MAD assurance did not autonomously restore desired state; "
                 f"state={snapshot.get('state')} failure={snapshot.get('failure')}"
             )
+
+        if not fault_expected:
+            # Keep observing after the independent no-op injector completes so
+            # the control condition can detect false-positive incidents.
+            stable_observation_s = min(
+                max(args.assurance_poll_interval_s * 5.0, 0.10),
+                max(args.duration - args.fault_after_s, 0.10),
+            )
+            time.sleep(stable_observation_s)
 
         unicast_during_incident = unicast_state_readback(
             adapter.observer,
@@ -935,25 +1121,67 @@ def orchestrate(args: argparse.Namespace) -> int:
         )
         injector = json.loads(injector_output.read_text(encoding="utf-8"))
 
-        drift_event = event_by_type(controller_snapshot, "drift_confirmed")
-        remediation_event = event_by_type(
-            controller_snapshot,
-            "remediation_attempt_started",
-        )
-        convergence_event = event_by_type(
-            controller_snapshot,
-            "convergence_confirmed",
-        )
-        if not drift_event or not remediation_event or not convergence_event:
-            fail("controller transition evidence is incomplete")
+        events = controller_snapshot.get("events") or []
+        drift_events = [
+            event
+            for event in events
+            if event.get("event_type") == "drift_confirmed"
+        ]
+        remediation_started_events = [
+            event
+            for event in events
+            if event.get("event_type") == "remediation_attempt_started"
+        ]
+        remediation_completed_events = [
+            event
+            for event in events
+            if event.get("event_type") == "remediation_attempt_completed"
+        ]
+        convergence_events = [
+            event
+            for event in events
+            if event.get("event_type") == "convergence_confirmed"
+        ]
+        backoff_events = [
+            event
+            for event in events
+            if event.get("event_type") == "remediation_backoff_started"
+        ]
+        forced_rejection_events = [
+            event
+            for event in remediation_completed_events
+            if (event.get("details") or {}).get("accepted") is False
+            and (
+                (event.get("details") or {}).get("details")
+                or {}
+            ).get("forced_test_rejection") is True
+        ]
+        accepted_remediation_events = [
+            event
+            for event in remediation_completed_events
+            if (event.get("details") or {}).get("accepted") is True
+        ]
 
-        fault_write_completed_ns = int(injector["write_completed_monotonic_ns"])
-        fault_absence_confirmed_ns = int(
-            injector["absence_confirmed_monotonic_ns"]
-        )
-        drift_confirmed_ns = int(drift_event["monotonic_ns"])
-        remediation_started_ns = int(remediation_event["monotonic_ns"])
-        convergence_confirmed_ns = int(convergence_event["monotonic_ns"])
+        expected_drift = expected_drift_kinds(args.fault_kind)
+        expected_components = expected_remediation_components(args.fault_kind)
+        observed_drift = set()
+        remediated_components: set[str] = set()
+
+        if drift_events:
+            observed_drift = set(
+                (drift_events[0].get("details") or {}).get("drift_kinds")
+                or []
+            )
+
+        for event in accepted_remediation_events:
+            outcome_details = (
+                (event.get("details") or {}).get("details")
+                or {}
+            )
+            for operation in outcome_details.get("operations") or []:
+                component = operation.get("component")
+                if component:
+                    remediated_components.add(str(component))
 
         multicast_sender_timeline = multicast_sender.get("packet_send_timeline") or []
         control_sender_timeline = control_sender.get("packet_send_timeline") or []
@@ -979,39 +1207,106 @@ def orchestrate(args: argparse.Namespace) -> int:
         )
         guard_ns = int(round(args.window_guard_s * 1_000_000_000.0))
 
-        multicast_windows = {
-            "pre_fault": (
-                first_mcast_send_ns + guard_ns,
-                int(injector["write_started_monotonic_ns"]),
-            ),
-            "autonomous_outage": (
-                fault_absence_confirmed_ns,
-                convergence_confirmed_ns,
-            ),
-            "post_recovery": (
-                convergence_confirmed_ns + guard_ns,
-                last_mcast_send_ns + 1,
-            ),
-        }
-        control_windows = {
-            "pre_fault": (
-                first_control_send_ns + guard_ns,
-                int(injector["write_started_monotonic_ns"]),
-            ),
-            "autonomous_outage": (
-                fault_absence_confirmed_ns,
-                convergence_confirmed_ns,
-            ),
-            "post_recovery": (
-                convergence_confirmed_ns + guard_ns,
-                last_control_send_ns + 1,
-            ),
-        }
+        timing_ms: dict[str, float | None]
+        multicast_windows: dict[str, tuple[int, int]]
+        control_windows: dict[str, tuple[int, int]]
+        convergence_confirmed_ns: int | None = None
+        remediation_started_ns: int | None = None
+        fault_effect_confirmed_ns = int(
+            injector.get("fault_effect_confirmed_monotonic_ns")
+            or injector.get("absence_confirmed_monotonic_ns")
+            or time.monotonic_ns()
+        )
+        fault_write_completed_ns = int(
+            injector.get("write_completed_monotonic_ns")
+            or time.monotonic_ns()
+        )
+
+        if fault_expected:
+            if (
+                len(drift_events) != 1
+                or not remediation_started_events
+                or len(convergence_events) != 1
+            ):
+                fail("controller transition evidence is incomplete")
+
+            drift_confirmed_ns = int(drift_events[0]["monotonic_ns"])
+            remediation_started_ns = int(
+                remediation_started_events[0]["monotonic_ns"]
+            )
+            convergence_confirmed_ns = int(
+                convergence_events[0]["monotonic_ns"]
+            )
+            timing_ms = {
+                "fault_write_to_drift_confirmation": (
+                    drift_confirmed_ns - fault_write_completed_ns
+                )
+                / 1_000_000.0,
+                "drift_confirmation_to_remediation_start": (
+                    remediation_started_ns - drift_confirmed_ns
+                )
+                / 1_000_000.0,
+                "remediation_start_to_convergence": (
+                    convergence_confirmed_ns - remediation_started_ns
+                )
+                / 1_000_000.0,
+                "fault_write_to_convergence": (
+                    convergence_confirmed_ns - fault_write_completed_ns
+                )
+                / 1_000_000.0,
+            }
+            multicast_windows = {
+                "pre_fault": (
+                    first_mcast_send_ns + guard_ns,
+                    int(injector["write_started_monotonic_ns"]),
+                ),
+                "autonomous_outage": (
+                    fault_effect_confirmed_ns,
+                    convergence_confirmed_ns,
+                ),
+                "post_recovery": (
+                    convergence_confirmed_ns + guard_ns,
+                    last_mcast_send_ns + 1,
+                ),
+            }
+            control_windows = {
+                "pre_fault": (
+                    first_control_send_ns + guard_ns,
+                    int(injector["write_started_monotonic_ns"]),
+                ),
+                "autonomous_outage": (
+                    fault_effect_confirmed_ns,
+                    convergence_confirmed_ns,
+                ),
+                "post_recovery": (
+                    convergence_confirmed_ns + guard_ns,
+                    last_control_send_ns + 1,
+                ),
+            }
+        else:
+            timing_ms = {
+                "fault_write_to_drift_confirmation": None,
+                "drift_confirmation_to_remediation_start": None,
+                "remediation_start_to_convergence": None,
+                "fault_write_to_convergence": None,
+            }
+            multicast_windows = {
+                "stable_full": (
+                    first_mcast_send_ns + guard_ns,
+                    last_mcast_send_ns + 1,
+                ),
+            }
+            control_windows = {
+                "stable_full": (
+                    first_control_send_ns + guard_ns,
+                    last_control_send_ns + 1,
+                ),
+            }
 
         multicast_metrics: dict[str, Any] = {}
         for label, receiver in multicast_receivers.items():
             receiver_timeline = receiver.get("packet_receive_timeline") or []
-            multicast_metrics[label] = {
+            metrics: dict[str, Any] = {
                 "windows": {
                     name: window_metrics(
                         multicast_sender_timeline,
@@ -1021,21 +1316,33 @@ def orchestrate(args: argparse.Namespace) -> int:
                     )
                     for name, (start_ns, end_ns) in multicast_windows.items()
                 },
-                "first_recovered_packet": first_recovered_packet(
-                    receiver_timeline,
-                    convergence_confirmed_ns,
-                    remediation_started_ns=remediation_started_ns,
-                    fault_injection_started_ns=fault_write_completed_ns,
-                ),
-                "crossing_gap": crossing_gap(
-                    receiver_timeline,
-                    absence_confirmed_ns=fault_absence_confirmed_ns,
-                    restoration_confirmed_ns=convergence_confirmed_ns,
-                ),
                 "malformed": int(receiver.get("malformed") or 0),
                 "duplicates": int(receiver.get("duplicates") or 0),
                 "lifecycle": receiver.get("lifecycle") or {},
             }
+            if fault_expected:
+                metrics["first_recovered_packet"] = first_recovered_packet(
+                    receiver_timeline,
+                    int(convergence_confirmed_ns),
+                    remediation_started_ns=int(remediation_started_ns),
+                    fault_injection_started_ns=fault_write_completed_ns,
+                )
+                metrics["crossing_gap"] = crossing_gap(
+                    receiver_timeline,
+                    absence_confirmed_ns=fault_effect_confirmed_ns,
+                    restoration_confirmed_ns=int(convergence_confirmed_ns),
+                )
+            else:
+                metrics["first_recovered_packet"] = {
+                    "found": False,
+                    "not_applicable": True,
+                }
+                metrics["crossing_gap"] = {
+                    "found": False,
+                    "not_applicable": True,
+                    "sequence_gap": 0,
+                }
+            multicast_metrics[label] = metrics
 
         control_receiver_timeline = control_receiver.get(
             "packet_receive_timeline"
@@ -1088,103 +1395,15 @@ def orchestrate(args: argparse.Namespace) -> int:
             ]
         )
 
-        timing_ms = {
-            "fault_write_to_drift_confirmation": (
-                drift_confirmed_ns - fault_write_completed_ns
-            )
-            / 1_000_000.0,
-            "drift_confirmation_to_remediation_start": (
-                remediation_started_ns - drift_confirmed_ns
-            )
-            / 1_000_000.0,
-            "remediation_start_to_convergence": (
-                convergence_confirmed_ns - remediation_started_ns
-            )
-            / 1_000_000.0,
-            "fault_write_to_convergence": (
-                convergence_confirmed_ns - fault_write_completed_ns
-            )
-            / 1_000_000.0,
-        }
-
-        candidate_checks = {
+        common_candidate_checks = {
             "independent_fault_injector": bool(
                 injector.get("fault_source")
                 == "independent_p4runtime_subprocess"
                 and injector.get("controller_notification_sent") is False
+                and injector.get("fault_kind") == args.fault_kind
             ),
-            "state_absence_confirmed": injector.get("absence_confirmed") is True,
-            "autonomous_drift_detected": bool(
-                controller_snapshot.get("incident_count") == 1
-                and controller.drift_detected_event.is_set()
-            ),
-            "drift_classification_complete": set(
-                (drift_event.get("details") or {}).get("drift_kinds") or []
-            )
-            >= {
-                "missing_pre_multicast_group",
-                "missing_multicast_table_entry",
-            },
-            "autonomous_remediation_attempted": bool(
-                controller_snapshot.get("remediation_attempt_count") >= 1
-            ),
-            "autonomous_convergence_confirmed": bool(
-                controller_snapshot.get("successful_convergence_count") == 1
-                and controller.first_recovery_event.is_set()
-            ),
-            "bounded_detection": (
-                timing_ms["fault_write_to_drift_confirmation"]
-                <= args.maximum_detection_ms
-            ),
-            "bounded_control_plane_recovery": (
-                timing_ms["remediation_start_to_convergence"]
-                <= args.maximum_control_plane_recovery_ms
-            ),
-            "bounded_total_reconciliation": (
-                timing_ms["fault_write_to_convergence"]
-                <= args.maximum_total_reconciliation_ms
-            ),
-            "multicast_pre_fault_delivery": all(
-                multicast_metrics[label]["windows"]["pre_fault"]["delivery_ratio"]
-                >= args.minimum_stable_delivery
-                for label in ("B", "C")
-            ),
-            "multicast_fault_effect_observed": all(
-                multicast_metrics[label]["crossing_gap"].get("found") is True
-                and int(
-                    multicast_metrics[label]["crossing_gap"].get("sequence_gap")
-                    or 0
-                )
-                >= args.minimum_lost_packets
-                for label in ("B", "C")
-            ),
-            "multicast_post_recovery_delivery": all(
-                multicast_metrics[label]["windows"]["post_recovery"][
-                    "delivery_ratio"
-                ]
-                >= args.minimum_stable_delivery
-                for label in ("B", "C")
-            ),
-            "first_packet_recovered": all(
-                multicast_metrics[label]["first_recovered_packet"]["found"] is True
-                and float(
-                    multicast_metrics[label]["first_recovered_packet"].get(
-                        "from_restoration_to_receive_ms"
-                    )
-                    if multicast_metrics[label]["first_recovered_packet"].get(
-                        "from_restoration_to_receive_ms"
-                    )
-                    is not None
-                    else float("inf")
-                )
-                <= args.maximum_first_packet_recovery_ms
-                for label in ("B", "C")
-            ),
-            "unicast_control_stable": all(
-                control_metrics["windows"][name]["expected_packets"] >= 1
-                and control_metrics["windows"][name]["delivery_ratio"]
-                >= args.minimum_control_delivery
-                for name in ("pre_fault", "autonomous_outage", "post_recovery")
+            "fault_effect_confirmed": (
+                injector.get("fault_effect_confirmed") is True
             ),
             "unicast_rule_continuity": (
                 unicast_during_incident.get("present") is True
@@ -1194,6 +1413,151 @@ def orchestrate(args: argparse.Namespace) -> int:
                 initial_port_ok and port_during_incident and final_port_ok
             ),
         }
+
+        if fault_expected:
+            candidate_checks = {
+                **common_candidate_checks,
+                "state_absence_confirmed": (
+                    injector.get("absence_confirmed") is True
+                ),
+                "autonomous_drift_detected": bool(
+                    controller_snapshot.get("incident_count") == 1
+                    and controller.drift_detected_event.is_set()
+                ),
+                "drift_classification_exact": (
+                    observed_drift == expected_drift
+                ),
+                "component_selective_remediation_exact": (
+                    remediated_components == expected_components
+                ),
+                "forced_rejection_count_exact": (
+                    len(forced_rejection_events)
+                    == args.assurance_forced_remediation_rejections
+                ),
+                "remediation_attempt_count_exact": (
+                    controller_snapshot.get("remediation_attempt_count")
+                    == 1 + args.assurance_forced_remediation_rejections
+                ),
+                "retry_backoff_behavior_exact": (
+                    (
+                        args.assurance_forced_remediation_rejections == 0
+                        and len(backoff_events) == 0
+                    )
+                    or (
+                        args.assurance_forced_remediation_rejections > 0
+                        and len(backoff_events)
+                        >= args.assurance_forced_remediation_rejections
+                    )
+                ),
+                "autonomous_convergence_confirmed": bool(
+                    controller_snapshot.get("successful_convergence_count") == 1
+                    and controller.first_recovery_event.is_set()
+                ),
+                "bounded_detection": (
+                    float(timing_ms["fault_write_to_drift_confirmation"])
+                    <= args.maximum_detection_ms
+                ),
+                "bounded_control_plane_recovery": (
+                    float(timing_ms["remediation_start_to_convergence"])
+                    <= args.maximum_control_plane_recovery_ms
+                ),
+                "bounded_total_reconciliation": (
+                    float(timing_ms["fault_write_to_convergence"])
+                    <= args.maximum_total_reconciliation_ms
+                ),
+                "multicast_pre_fault_delivery": all(
+                    multicast_metrics[label]["windows"]["pre_fault"][
+                        "delivery_ratio"
+                    ]
+                    >= args.minimum_stable_delivery
+                    for label in ("B", "C")
+                ),
+                "multicast_fault_effect_observed": all(
+                    multicast_metrics[label]["crossing_gap"].get("found") is True
+                    and int(
+                        multicast_metrics[label]["crossing_gap"].get(
+                            "sequence_gap"
+                        )
+                        or 0
+                    )
+                    >= args.minimum_lost_packets
+                    for label in ("B", "C")
+                ),
+                "multicast_post_recovery_delivery": all(
+                    multicast_metrics[label]["windows"]["post_recovery"][
+                        "delivery_ratio"
+                    ]
+                    >= args.minimum_stable_delivery
+                    for label in ("B", "C")
+                ),
+                "first_packet_recovered": all(
+                    multicast_metrics[label]["first_recovered_packet"].get(
+                        "found"
+                    )
+                    is True
+                    and float(
+                        multicast_metrics[label]["first_recovered_packet"].get(
+                            "from_restoration_to_receive_ms"
+                        )
+                        if multicast_metrics[label]["first_recovered_packet"].get(
+                            "from_restoration_to_receive_ms"
+                        )
+                        is not None
+                        else float("inf")
+                    )
+                    <= args.maximum_first_packet_recovery_ms
+                    for label in ("B", "C")
+                ),
+                "unicast_control_stable": all(
+                    control_metrics["windows"][name]["expected_packets"] >= 1
+                    and control_metrics["windows"][name]["delivery_ratio"]
+                    >= args.minimum_control_delivery
+                    for name in (
+                        "pre_fault",
+                        "autonomous_outage",
+                        "post_recovery",
+                    )
+                ),
+            }
+        else:
+            candidate_checks = {
+                **common_candidate_checks,
+                "no_fault_state_remained_converged": bool(
+                    injector.get("fault_injected") is False
+                    and (
+                        injector.get("fault_effect_readback")
+                        or {}
+                    ).get("complete_present")
+                    is True
+                ),
+                "no_false_positive_incident": bool(
+                    controller_snapshot.get("incident_count") == 0
+                    and controller_snapshot.get("remediation_attempt_count") == 0
+                    and controller_snapshot.get("successful_convergence_count") == 0
+                    and not drift_events
+                    and not remediation_started_events
+                    and not convergence_events
+                    and not backoff_events
+                ),
+                "stable_multicast_delivery": all(
+                    multicast_metrics[label]["windows"]["stable_full"][
+                        "delivery_ratio"
+                    ]
+                    >= args.minimum_stable_delivery
+                    for label in ("B", "C")
+                ),
+                "stable_unicast_control": bool(
+                    control_metrics["windows"]["stable_full"][
+                        "expected_packets"
+                    ]
+                    >= 1
+                    and control_metrics["windows"]["stable_full"][
+                        "delivery_ratio"
+                    ]
+                    >= args.minimum_control_delivery
+                ),
+            }
+
         candidate_found = all(candidate_checks.values())
 
         cleanup_client = P4RTClient(
@@ -1266,12 +1630,24 @@ def orchestrate(args: argparse.Namespace) -> int:
             "scope": {
                 "desired_state_supplied_by_s2_orchestration": True,
                 "persistent_mad_assurance_loop_exercised": True,
-                "autonomous_mad_detection_exercised": True,
-                "autonomous_mad_recovery_exercised": True,
+                "autonomous_mad_detection_exercised": fault_expected,
+                "autonomous_mad_recovery_exercised": fault_expected,
+                "no_fault_false_positive_control_exercised": (
+                    not fault_expected
+                ),
+                "component_selective_drift_classification_exercised": (
+                    args.fault_kind in {"pre_only", "table_only"}
+                ),
+                "synthetic_remediation_rejection_exercised": (
+                    args.assurance_forced_remediation_rejections > 0
+                ),
+                "retry_and_backoff_execution_exercised": (
+                    bool(backoff_events)
+                ),
                 "fault_schedule_shared_with_controller": False,
                 "independent_fault_injector_process_exercised": True,
                 "p4runtime_readback_assurance_exercised": True,
-                "idempotent_component_reapply_exercised": True,
+                "idempotent_component_reapply_exercised": fault_expected,
                 "bounded_retry_and_backoff_policy_enabled": True,
                 "unicast_dataplane_continuity_control_exercised": True,
                 "bmv2_process_restart_exercised": False,
@@ -1282,6 +1658,11 @@ def orchestrate(args: argparse.Namespace) -> int:
             "configuration": {
                 "duration_s": args.duration,
                 "fault_after_s": args.fault_after_s,
+                "fault_kind": args.fault_kind,
+                "fault_expected": fault_expected,
+                "forced_remediation_rejections": (
+                    args.assurance_forced_remediation_rejections
+                ),
                 "minimum_post_s": args.minimum_post_s,
                 "window_guard_s": args.window_guard_s,
                 "multicast_payload_rate_mbps": args.multicast_rate_mbps,
@@ -1326,6 +1707,15 @@ def orchestrate(args: argparse.Namespace) -> int:
             },
             "recovery_metrics": {
                 "timing_ms": timing_ms,
+                "expected_drift_kinds": sorted(expected_drift),
+                "observed_drift_kinds": sorted(observed_drift),
+                "expected_remediation_components": sorted(expected_components),
+                "remediated_components": sorted(remediated_components),
+                "forced_rejection_event_count": len(forced_rejection_events),
+                "backoff_event_count": len(backoff_events),
+                "accepted_remediation_event_count": (
+                    len(accepted_remediation_events)
+                ),
                 "multicast_receivers": multicast_metrics,
                 "unicast_control": control_metrics,
                 "candidate_checks": candidate_checks,
@@ -1344,37 +1734,75 @@ def orchestrate(args: argparse.Namespace) -> int:
         dump_json(summary_path, summary)
 
         print(f"PHASE16_ASSURANCE_PROFILE_ID={args.assurance_profile_id}")
+        print(f"PHASE16_ASSURANCE_FAULT_KIND={args.fault_kind}")
         print("PHASE16_ASSURANCE_FAULT_SCHEDULE_SHARED=False")
-        print("PHASE16_ASSURANCE_AUTONOMOUS_DETECTION_EXERCISED=True")
-        print("PHASE16_ASSURANCE_AUTONOMOUS_RECOVERY_EXERCISED=True")
         print(
-            "PHASE16_ASSURANCE_DETECTION_MS="
-            f"{timing_ms['fault_write_to_drift_confirmation']:.6f}"
+            "PHASE16_ASSURANCE_AUTONOMOUS_DETECTION_EXERCISED="
+            f"{fault_expected}"
         )
         print(
-            "PHASE16_ASSURANCE_CONTROL_PLANE_RECOVERY_MS="
-            f"{timing_ms['remediation_start_to_convergence']:.6f}"
+            "PHASE16_ASSURANCE_AUTONOMOUS_RECOVERY_EXERCISED="
+            f"{fault_expected}"
         )
         print(
-            "PHASE16_ASSURANCE_TOTAL_RECONCILIATION_MS="
-            f"{timing_ms['fault_write_to_convergence']:.6f}"
+            "PHASE16_ASSURANCE_REMEDIATION_ATTEMPTS="
+            f"{controller_snapshot.get('remediation_attempt_count')}"
         )
+        print(
+            "PHASE16_ASSURANCE_FORCED_REJECTION_EVENTS="
+            f"{len(forced_rejection_events)}"
+        )
+        print(
+            "PHASE16_ASSURANCE_BACKOFF_EVENTS="
+            f"{len(backoff_events)}"
+        )
+        if fault_expected:
+            print(
+                "PHASE16_ASSURANCE_DETECTION_MS="
+                f"{float(timing_ms['fault_write_to_drift_confirmation']):.6f}"
+            )
+            print(
+                "PHASE16_ASSURANCE_CONTROL_PLANE_RECOVERY_MS="
+                f"{float(timing_ms['remediation_start_to_convergence']):.6f}"
+            )
+            print(
+                "PHASE16_ASSURANCE_TOTAL_RECONCILIATION_MS="
+                f"{float(timing_ms['fault_write_to_convergence']):.6f}"
+            )
+        else:
+            print("PHASE16_ASSURANCE_DETECTION_MS=0.000000")
+            print("PHASE16_ASSURANCE_CONTROL_PLANE_RECOVERY_MS=0.000000")
+            print("PHASE16_ASSURANCE_TOTAL_RECONCILIATION_MS=0.000000")
+
         for label in ("B", "C"):
             metrics = multicast_metrics[label]
+            if fault_expected:
+                pre_ratio = metrics["windows"]["pre_fault"]["delivery_ratio"]
+                post_ratio = metrics["windows"]["post_recovery"][
+                    "delivery_ratio"
+                ]
+                sequence_gap = int(
+                    metrics["crossing_gap"].get("sequence_gap") or 0
+                )
+                first_packet_ms = metrics["first_recovered_packet"].get(
+                    "from_restoration_to_receive_ms"
+                )
+            else:
+                pre_ratio = metrics["windows"]["stable_full"]["delivery_ratio"]
+                post_ratio = pre_ratio
+                sequence_gap = 0
+                first_packet_ms = 0.0
             print(
                 f"PHASE16_ASSURANCE_{label}_PRE_RATIO="
-                f"{metrics['windows']['pre_fault']['delivery_ratio']:.9f}"
+                f"{float(pre_ratio):.9f}"
             )
             print(
                 f"PHASE16_ASSURANCE_{label}_POST_RATIO="
-                f"{metrics['windows']['post_recovery']['delivery_ratio']:.9f}"
+                f"{float(post_ratio):.9f}"
             )
             print(
                 f"PHASE16_ASSURANCE_{label}_SEQUENCE_GAP="
-                f"{int(metrics['crossing_gap'].get('sequence_gap') or 0)}"
-            )
-            first_packet_ms = metrics["first_recovered_packet"].get(
-                "from_restoration_to_receive_ms"
+                f"{sequence_gap}"
             )
             print(
                 f"PHASE16_ASSURANCE_{label}_FIRST_PACKET_MS="
@@ -1437,6 +1865,11 @@ def build_parser() -> argparse.ArgumentParser:
     injector.add_argument("--start-barrier", required=True)
     injector.add_argument("--barrier-timeout-s", type=float, default=10.0)
     injector.add_argument("--delay-s", type=float, default=4.0)
+    injector.add_argument(
+        "--fault-kind",
+        choices=("none", "pre_only", "table_only", "both"),
+        default="both",
+    )
     injector.add_argument("--election-low", type=int, default=16110)
     add_common_p4_arguments(injector)
 
@@ -1468,6 +1901,11 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument("--control-egress-port", type=int, default=1)
     orchestrator.add_argument("--duration", type=float, default=12.0)
     orchestrator.add_argument("--fault-after-s", type=float, default=4.0)
+    orchestrator.add_argument(
+        "--fault-kind",
+        choices=("none", "pre_only", "table_only", "both"),
+        default="both",
+    )
     orchestrator.add_argument("--minimum-post-s", type=float, default=5.0)
     orchestrator.add_argument("--window-guard-s", type=float, default=0.25)
     orchestrator.add_argument("--multicast-rate-mbps", type=float, default=2.0)
@@ -1504,6 +1942,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--assurance-maximum-remediation-attempts",
         type=int,
         default=3,
+    )
+    orchestrator.add_argument(
+        "--assurance-forced-remediation-rejections",
+        type=int,
+        default=0,
+        help=(
+            "synthetically reject a bounded number of initial remediation "
+            "attempts to validate retry and backoff behavior"
+        ),
     )
     orchestrator.add_argument("--assurance-initial-backoff-s", type=float, default=0.01)
     orchestrator.add_argument("--assurance-backoff-multiplier", type=float, default=2.0)
