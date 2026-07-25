@@ -429,3 +429,73 @@ a recuperação autônoma, a reinicialização do BMv2 e a recarga do pipeline.
 
 O perfil completo, os limiares e a delimitação das afirmações estão em
 [`profiles/s2_state_recovery_profile.json`](../profiles/s2_state_recovery_profile.json).
+
+
+---
+
+# 🛡️ 13. Perfil validado de assurance autônomo S2/P4
+
+O ciclo persistente de assurance utiliza o perfil
+`phase16-s2-p4-autonomous-assurance-v1`. Diferentemente do ensaio da Seção 12,
+o controlador não recebe o instante da falha nem um comando de recuperação. Um
+processo independente remove seletivamente estado P4Runtime após uma barreira de
+início do tráfego, enquanto o componente `MADAssuranceController` mantém o
+estado desejado, realiza readback periódico, confirma a deriva, classifica os
+componentes ausentes, rematerializa somente os componentes divergentes e
+confirma a convergência por novas observações.
+
+A matriz completa pode ser executada por:
+
+```bash
+./setup_all.sh run_s2_p4_autonomous_assurance_validation
+```
+
+A validação usa oito execuções em ordem espelhada `A → B → C → D → D → C → B
+→ A`. A condição A não injeta falha e verifica falsos positivos. A condição B
+remove somente o grupo multicast PRE; a condição C remove somente a entrada da
+tabela multicast; e a condição D remove ambos os componentes e rejeita
+sinteticamente a primeira tentativa de remediação para exercitar retry e
+backoff limitados.
+
+Os padrões promovidos para uma execução direta são:
+
+```text
+S2_ASSURANCE_PROFILE_ID=phase16-s2-p4-autonomous-assurance-v1
+S2_ASSURANCE_DURATION=12
+S2_ASSURANCE_FAULT_AFTER_S=4
+S2_ASSURANCE_FAULT_KIND=both
+S2_ASSURANCE_FORCED_REMEDIATION_REJECTIONS=0
+S2_ASSURANCE_MULTICAST_RATE_MBPS=2
+S2_ASSURANCE_CONTROL_RATE_MBPS=0.5
+S2_ASSURANCE_PACKET_SIZE=1200
+S2_ASSURANCE_SPIN_THRESHOLD_US=900
+S2_ASSURANCE_POLL_INTERVAL_S=0.02
+S2_ASSURANCE_DRIFT_CONFIRMATIONS=3
+S2_ASSURANCE_CONVERGENCE_CONFIRMATIONS=2
+S2_ASSURANCE_MAX_REMEDIATION_ATTEMPTS=3
+S2_ASSURANCE_INITIAL_BACKOFF_S=0.01
+S2_ASSURANCE_BACKOFF_MULTIPLIER=2
+S2_ASSURANCE_MAX_BACKOFF_S=0.10
+S2_ASSURANCE_MAX_DETECTION_MS=150
+S2_ASSURANCE_MAX_CONTROL_PLANE_RECOVERY_MS=250
+S2_ASSURANCE_MAX_TOTAL_RECONCILIATION_MS=400
+```
+
+Nas duas execuções sem falha, nenhum incidente foi declarado e a entrega
+permaneceu integral. Nas seis execuções com deriva, a classificação e a
+rematerialização seletiva foram exatas em todas as ocorrências. As duas
+execuções da condição D registraram uma rejeição sintética, um evento de
+backoff e convergência na segunda tentativa. A detecção apresentou máximo de
+`90.053 ms`, a recuperação do plano de controle máximo de `107.633 ms` e a
+reconciliação completa máximo de `192.341 ms`. B e C mantiveram entrega integral
+antes da falha e após a convergência; o fluxo unicast de controle permaneceu em
+`1.0` em todas as janelas.
+
+O perfil valida assurance autônomo em um único domínio P4Runtime. Permanecem
+fora do escopo a coordenação de assurance multidomínio, a reinicialização do
+BMv2, a recarga do pipeline, a recompilação de intenções e a resolução de
+conflitos entre políticas. A rejeição usada para validar retry e backoff é uma
+falha sintética do adaptador experimental, não uma falha observada do backend.
+
+O perfil completo e a delimitação das afirmações estão em
+[`profiles/s2_autonomous_assurance_profile.json`](../profiles/s2_autonomous_assurance_profile.json).

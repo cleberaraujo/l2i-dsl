@@ -1880,7 +1880,7 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument("--output-dir", required=True)
     orchestrator.add_argument(
         "--assurance-profile-id",
-        default="phase16-s2-p4-autonomous-assurance-foundation-v1",
+        default="phase16-s2-p4-autonomous-assurance-v1",
     )
     add_common_p4_arguments(orchestrator)
     orchestrator.add_argument("--multicast-port", type=int, default=5001)
@@ -1924,12 +1924,12 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument(
         "--maximum-control-plane-recovery-ms",
         type=float,
-        default=150.0,
+        default=250.0,
     )
     orchestrator.add_argument(
         "--maximum-total-reconciliation-ms",
         type=float,
-        default=250.0,
+        default=400.0,
     )
     orchestrator.add_argument("--assurance-poll-interval-s", type=float, default=0.02)
     orchestrator.add_argument("--assurance-drift-confirmations", type=int, default=3)

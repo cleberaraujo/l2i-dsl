@@ -109,7 +109,7 @@ do
   timeout "$RUN_TIMEOUT_S" \
     env \
       S2_ASSURANCE_OUTPUT_DIR="$run_dir" \
-      S2_ASSURANCE_PROFILE_ID="phase16-s2-p4-autonomous-assurance-validation-v1" \
+      S2_ASSURANCE_PROFILE_ID="phase16-s2-p4-autonomous-assurance-v1" \
       S2_ASSURANCE_DURATION="$duration_s" \
       S2_ASSURANCE_FAULT_AFTER_S="$fault_after_s" \
       S2_ASSURANCE_FAULT_KIND="$fault_kind" \
@@ -281,7 +281,7 @@ for row in rows:
         and summary.get("fault_model")
         == "independent_p4runtime_multicast_state_deletion"
         and summary.get("assurance_profile_id")
-        == "phase16-s2-p4-autonomous-assurance-validation-v1"
+        == "phase16-s2-p4-autonomous-assurance-v1"
         and summary.get("passed") is True
         and run_candidate_consistent
         and config.get("fault_kind") == fault_kind

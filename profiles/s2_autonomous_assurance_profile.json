@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase16-s2-p4-autonomous-assurance-v1",
+  "scenario": "S2_P4_multicast_autonomous_assurance",
+  "selection_status": "production_confirmed",
+  "fault_model": "independent_p4runtime_multicast_state_deletion",
+  "topology": {
+    "multicast_source_namespace": "h1",
+    "multicast_receivers": {
+      "B": "h3",
+      "C": "h4"
+    },
+    "multicast_group": "239.1.1.1",
+    "multicast_group_id": 1,
+    "multicast_egress_ports": [
+      1,
+      2
+    ],
+    "unicast_control_source_namespace": "h2",
+    "unicast_control_receiver_namespace": "h3",
+    "unicast_control_ingress_port": 3,
+    "unicast_control_egress_port": 1
+  },
+  "runtime": {
+    "multicast_payload_rate_mbps": 2.0,
+    "unicast_control_payload_rate_mbps": 0.5,
+    "payload_packet_size_bytes": 1200,
+    "sender_profile_id": "phase13-tailspin-900us-affinity-v1",
+    "spin_threshold_us": 900.0,
+    "multicast_sender_cpu": "auto",
+    "control_sender_cpu": "auto-distinct",
+    "default_duration_s": 12.0,
+    "default_fault_after_s": 4.0,
+    "default_fault_kind": "both",
+    "minimum_post_recovery_s": 5.0,
+    "window_guard_s": 0.25,
+    "minimum_stable_delivery_ratio": 0.99,
+    "minimum_control_delivery_ratio": 0.99,
+    "minimum_lost_packets": 1,
+    "maximum_first_packet_after_convergence_ms": 50.0
+  },
+  "assurance_policy": {
+    "poll_interval_s": 0.02,
+    "drift_confirmations": 3,
+    "convergence_confirmations": 2,
+    "maximum_remediation_attempts": 3,
+    "initial_backoff_s": 0.01,
+    "backoff_multiplier": 2.0,
+    "maximum_backoff_s": 0.1,
+    "state_readback_timeout_s": 2.0,
+    "state_poll_interval_s": 0.01,
+    "maximum_detection_ms": 150.0,
+    "maximum_control_plane_recovery_ms": 250.0,
+    "maximum_total_reconciliation_ms": 400.0
+  },
+  "validation_design": {
+    "run_count": 8,
+    "mirrored_condition_order": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "D",
+      "C",
+      "B",
+      "A"
+    ],
+    "conditions": {
+      "A": {
+        "fault_kind": "none",
+        "forced_remediation_rejections": 0,
+        "fault_after_s": 4.0,
+        "duration_s": 10.0
+      },
+      "B": {
+        "fault_kind": "pre_only",
+        "forced_remediation_rejections": 0,
+        "fault_after_s": 3.5,
+        "duration_s": 12.0
+      },
+      "C": {
+        "fault_kind": "table_only",
+        "forced_remediation_rejections": 0,
+        "fault_after_s": 4.5,
+        "duration_s": 12.0
+      },
+      "D": {
+        "fault_kind": "both",
+        "forced_remediation_rejections": 1,
+        "fault_after_s": 4.0,
+        "duration_s": 13.0
+      }
+    }
+  },
+  "validation_results": {
+    "valid_runs": 8,
+    "no_fault_valid_runs": 2,
+    "no_false_positive_incidents": 0,
+    "pre_only_valid_runs": 2,
+    "table_only_valid_runs": 2,
+    "retry_valid_runs": 2,
+    "selective_remediation_exact_count": 6,
+    "forced_rejection_event_count": 2,
+    "backoff_event_count": 2,
+    "autonomous_convergence_count": 6,
+    "maximum_remediation_attempts_observed": 2,
+    "receiver_b_minimum_sequence_gap": 27,
+    "receiver_c_minimum_sequence_gap": 27,
+    "no_fault_minimum_delivery_ratio": 1.0,
+    "pre_fault_minimum_delivery_ratio": 1.0,
+    "post_recovery_minimum_delivery_ratio": 1.0,
+    "unicast_control_minimum_delivery_ratio": 1.0,
+    "detection_median_ms": 74.021358,
+    "detection_max_ms": 90.05326,
+    "control_plane_recovery_median_ms": 68.222644,
+    "control_plane_recovery_max_ms": 107.632906,
+    "total_reconciliation_median_ms": 147.224386,
+    "total_reconciliation_max_ms": 192.340977
+  },
+  "validated_properties": {
+    "persistent_mad_assurance_loop": true,
+    "no_fault_false_positive_control": true,
+    "autonomous_p4runtime_drift_detection": true,
+    "exact_component_drift_classification": true,
+    "component_selective_state_rematerialization": true,
+    "bounded_retry_and_backoff": true,
+    "autonomous_convergence_confirmation": true,
+    "multicast_dataplane_resumption": true,
+    "unicast_control_continuity": true,
+    "bmv2_process_continuity": true
+  },
+  "scope": {
+    "independent_fault_injector_process_exercised": true,
+    "fault_schedule_shared_with_controller": false,
+    "synthetic_first_remediation_rejection_exercised": true,
+    "single_p4runtime_domain_assurance_validated": true,
+    "multi_domain_assurance_validated": false,
+    "bmv2_process_restart_exercised": false,
+    "pipeline_reload_exercised": false,
+    "intent_recompilation_validated": false,
+    "policy_conflict_resolution_validated": false
+  },
+  "notes": [
+    "The independent injector knows only a traffic-start barrier and its private delay; it does not notify the MAD assurance controller or invoke remediation.",
+    "The controller confirms drift through repeated P4Runtime observations, classifies the missing PRE group and multicast table entry independently, reapplies only the divergent components, and confirms convergence through repeated readbacks.",
+    "Condition A validates the absence of false-positive incidents when no state is deleted. Conditions B and C validate exact component-selective classification and rematerialization.",
+    "Condition D synthetically rejects the first remediation attempt to exercise the generic retry and exponential-backoff state machine; it is not evidence of an actual BMv2 write failure.",
+    "The profile validates autonomous assurance in one P4Runtime domain. It does not validate multi-domain assurance, BMv2 process restart, pipeline reload, intent recompilation, or policy-conflict resolution."
+  ]
+}

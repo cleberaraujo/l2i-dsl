@@ -1352,7 +1352,7 @@ run_s2_p4_autonomous_assurance() {
     "$REPO_DIR/scripts/s2_p4_autonomous_assurance.py" \
       orchestrate \
       --output-dir "$output_dir" \
-      --assurance-profile-id "${S2_ASSURANCE_PROFILE_ID:-phase16-s2-p4-autonomous-assurance-foundation-v1}" \
+      --assurance-profile-id "${S2_ASSURANCE_PROFILE_ID:-phase16-s2-p4-autonomous-assurance-v1}" \
       --p4-addr "$P4_ADDR" \
       --p4-host 127.0.0.1 \
       --p4-port "$P4_PORT" \
@@ -1381,8 +1381,8 @@ run_s2_p4_autonomous_assurance() {
       --minimum-lost-packets "${S2_ASSURANCE_MINIMUM_LOST_PACKETS:-1}" \
       --maximum-first-packet-recovery-ms "${S2_ASSURANCE_MAX_FIRST_PACKET_MS:-50}" \
       --maximum-detection-ms "${S2_ASSURANCE_MAX_DETECTION_MS:-150}" \
-      --maximum-control-plane-recovery-ms "${S2_ASSURANCE_MAX_CONTROL_PLANE_RECOVERY_MS:-150}" \
-      --maximum-total-reconciliation-ms "${S2_ASSURANCE_MAX_TOTAL_RECONCILIATION_MS:-250}" \
+      --maximum-control-plane-recovery-ms "${S2_ASSURANCE_MAX_CONTROL_PLANE_RECOVERY_MS:-250}" \
+      --maximum-total-reconciliation-ms "${S2_ASSURANCE_MAX_TOTAL_RECONCILIATION_MS:-400}" \
       --assurance-poll-interval-s "${S2_ASSURANCE_POLL_INTERVAL_S:-0.02}" \
       --assurance-drift-confirmations "${S2_ASSURANCE_DRIFT_CONFIRMATIONS:-3}" \
       --assurance-convergence-confirmations "${S2_ASSURANCE_CONVERGENCE_CONFIRMATIONS:-2}" \
