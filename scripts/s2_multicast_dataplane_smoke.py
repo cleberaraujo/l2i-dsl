@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import socket
 import statistics
 import struct
@@ -44,6 +45,77 @@ def dump_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def wait_minimum_interval(deadline_ns: int) -> None:
+    """Wait with short sleeps while preserving the no-catch-up invariant.
+
+    Short repeated sleeps were more stable than one coarse sleep in the Phase
+    13 foundation calibration. The caller anchors the next deadline to the
+    actual previous send time, so scheduler stalls never create compensating
+    packet bursts.
+    """
+
+    while True:
+        remaining_ns = deadline_ns - time.monotonic_ns()
+        if remaining_ns <= 0:
+            return
+        time.sleep(min(remaining_ns / 1_000_000_000.0, 0.002))
+
+
+def wait_repeated_sleep_spin(deadline_ns: int, spin_threshold_ns: int) -> None:
+    """Use repeated short sleeps followed by a bounded active-wait tail.
+
+    The active-wait window compensates for the final scheduler wake-up
+    overshoot measured in Phase 13. It is bounded by ``spin_threshold_ns`` and
+    does not change the no-catch-up scheduling rule enforced by the caller.
+    """
+
+    if spin_threshold_ns < 0:
+        raise ValueError("spin threshold must not be negative")
+
+    while True:
+        now_ns = time.monotonic_ns()
+        remaining_ns = deadline_ns - now_ns
+
+        if remaining_ns <= 0:
+            return
+
+        if remaining_ns > spin_threshold_ns:
+            sleep_ns = min(remaining_ns - spin_threshold_ns, 2_000_000)
+            if sleep_ns > 0:
+                time.sleep(sleep_ns / 1_000_000_000.0)
+                continue
+
+        while time.monotonic_ns() < deadline_ns:
+            pass
+        return
+
+
+def resolve_sender_cpu(value: str) -> int | None:
+    """Resolve an optional sender CPU without assuming contiguous CPU IDs."""
+
+    normalized = value.strip().lower()
+    if normalized in {"", "none"}:
+        return None
+
+    allowed = sorted(os.sched_getaffinity(0))
+    if not allowed:
+        raise SystemExit("no CPU is available in the current affinity mask")
+
+    if normalized == "auto":
+        return allowed[-1]
+
+    try:
+        cpu = int(normalized)
+    except ValueError as exc:
+        raise SystemExit("sender CPU must be 'none', 'auto', or an integer") from exc
+
+    if cpu not in allowed:
+        raise SystemExit(
+            f"sender CPU {cpu} is outside the allowed affinity mask {allowed}"
+        )
+    return cpu
+
+
 def sender(args: argparse.Namespace) -> int:
     payload_bytes = int(args.packet_size)
     if payload_bytes < HEADER.size:
@@ -56,6 +128,15 @@ def sender(args: argparse.Namespace) -> int:
     packets_per_second = (float(args.rate_mbps) * 1_000_000.0) / (8.0 * payload_bytes)
     total_packets = max(1, int(round(float(args.duration) * packets_per_second)))
     interval_ns = max(1, int(1_000_000_000.0 / packets_per_second))
+    spin_threshold_ns = int(round(float(args.spin_threshold_us) * 1_000.0))
+
+    if args.pacing_mode == "repeated_sleep_spin":
+        if spin_threshold_ns <= 0:
+            raise SystemExit("repeated_sleep_spin requires a positive spin threshold")
+        if spin_threshold_ns >= interval_ns:
+            raise SystemExit("spin threshold must be smaller than the packet interval")
+    elif spin_threshold_ns != 0:
+        raise SystemExit("spin threshold must be zero for minimum_interval_no_catchup")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
@@ -64,6 +145,7 @@ def sender(args: argparse.Namespace) -> int:
     sock.bind((args.source_ip, 0))
 
     filler = b"X" * (payload_bytes - HEADER.size)
+    process_start_ns = time.process_time_ns()
     start_ns = time.monotonic_ns()
     next_deadline_ns = start_ns
     previous_send_ns: int | None = None
@@ -74,11 +156,10 @@ def sender(args: argparse.Namespace) -> int:
     deadline_misses = 0
 
     for seq in range(total_packets):
-        while True:
-            remaining = next_deadline_ns - time.monotonic_ns()
-            if remaining <= 0:
-                break
-            time.sleep(min(remaining / 1_000_000_000.0, 0.002))
+        if args.pacing_mode == "repeated_sleep_spin":
+            wait_repeated_sleep_spin(next_deadline_ns, spin_threshold_ns)
+        else:
+            wait_minimum_interval(next_deadline_ns)
 
         send_ns = time.monotonic_ns()
         lateness_ns = max(0, send_ns - next_deadline_ns)
@@ -105,6 +186,7 @@ def sender(args: argparse.Namespace) -> int:
         next_deadline_ns = send_ns + interval_ns
 
     end_ns = time.monotonic_ns()
+    process_end_ns = time.process_time_ns()
     sock.close()
     elapsed_s = (end_ns - start_ns) / 1_000_000_000.0
     actual_payload_mbps = (
@@ -112,6 +194,12 @@ def sender(args: argparse.Namespace) -> int:
         if elapsed_s > 0
         else 0.0
     )
+    rate_error_pct = (
+        ((actual_payload_mbps - float(args.rate_mbps)) / float(args.rate_mbps))
+        * 100.0
+    )
+    process_cpu_s = (process_end_ns - process_start_ns) / 1_000_000_000.0
+    cpu_ratio = process_cpu_s / elapsed_s if elapsed_s > 0 else 0.0
 
     result = {
         "role": "sender",
@@ -128,9 +216,14 @@ def sender(args: argparse.Namespace) -> int:
         "completed_monotonic_ns": end_ns,
         "elapsed_s": elapsed_s,
         "rate_payload_mbps_actual": actual_payload_mbps,
+        "rate_error_pct": rate_error_pct,
+        "process_cpu_s": process_cpu_s,
+        "cpu_ratio": cpu_ratio,
         "pacing": {
-            "mode": "minimum_interval_no_catchup",
+            "mode": args.pacing_mode,
             "interval_ns": interval_ns,
+            "spin_threshold_us": float(args.spin_threshold_us),
+            "no_catch_up": True,
             "deadline_misses": deadline_misses,
             "scheduler_lateness_ms": {
                 "min": min(scheduler_lateness_ms) if scheduler_lateness_ms else None,
@@ -154,9 +247,12 @@ def sender(args: argparse.Namespace) -> int:
     dump_json(Path(args.output), result)
     print(f"S2_DP_SENDER_PACKETS_SENT={sent}")
     print(f"S2_DP_SENDER_PACKETS_PLANNED={total_packets}")
-    print("S2_DP_SENDER_PACING_MODE=minimum_interval_no_catchup")
+    print(f"S2_DP_SENDER_PACING_MODE={args.pacing_mode}")
+    print(f"S2_DP_SENDER_SPIN_THRESHOLD_US={float(args.spin_threshold_us):.3f}")
     print(f"S2_DP_SENDER_DEADLINE_MISSES={deadline_misses}")
     print(f"S2_DP_SENDER_ACTUAL_PAYLOAD_MBPS={actual_payload_mbps:.6f}")
+    print(f"S2_DP_SENDER_RATE_ERROR_PCT={rate_error_pct:.6f}")
+    print(f"S2_DP_SENDER_CPU_RATIO={cpu_ratio:.6f}")
     print(
         "S2_DP_SENDER_MAX_SCHEDULER_LATENESS_MS="
         f"{max(scheduler_lateness_ms) if scheduler_lateness_ms else 0.0:.6f}"
@@ -355,8 +451,18 @@ def orchestrate(args: argparse.Namespace) -> int:
     print(f"S2_DP_RECEIVER_READINESS_WAIT_S={readiness_wait_s:.6f}")
 
     sender_output = output_dir / "sender.json"
+    sender_cpu = resolve_sender_cpu(args.sender_cpu)
     sender_command = [
         "ip", "netns", "exec", args.source_namespace,
+    ]
+
+    # Apply affinity only to the source process. Receiver and orchestrator CPU
+    # placement remain unchanged, which makes the evidence explicit and avoids
+    # unintentionally pinning the whole test harness to one virtual CPU.
+    if sender_cpu is not None:
+        sender_command.extend(["taskset", "-c", str(sender_cpu)])
+
+    sender_command.extend([
         python, str(script), "sender",
         "--group", args.group,
         "--port", str(args.port),
@@ -364,8 +470,12 @@ def orchestrate(args: argparse.Namespace) -> int:
         "--duration", str(args.duration),
         "--rate-mbps", str(args.rate_mbps),
         "--packet-size", str(args.packet_size),
+        "--pacing-mode", args.pacing_mode,
+        "--spin-threshold-us", str(args.spin_threshold_us),
         "--output", str(sender_output),
-    ]
+    ])
+
+    print(f"S2_DP_SENDER_CPU={sender_cpu if sender_cpu is not None else 'none'}")
 
     if readiness_ok:
         sender_completed = subprocess.run(sender_command, text=True, capture_output=True, check=False)
@@ -427,12 +537,33 @@ def orchestrate(args: argparse.Namespace) -> int:
     sender_data = json.loads(sender_output.read_text(encoding="utf-8"))
     sent = int(sender_data.get("packets_sent") or 0)
     planned = int(sender_data.get("packets_planned") or 0)
+    actual_rate = float(sender_data.get("rate_payload_mbps_actual") or 0.0)
+    requested_rate = float(sender_data.get("rate_payload_mbps_requested") or 0.0)
+    absolute_rate_error_pct = abs(
+        float(sender_data.get("rate_error_pct") or 0.0)
+    )
+    pacing = sender_data.get("pacing") or {}
+    inter_send = pacing.get("inter_send_ms") or {}
+    interval_ms = float(pacing.get("interval_ns") or 0) / 1_000_000.0
+    minimum_inter_send_ms = float(inter_send.get("min") or 0.0)
+    minimum_inter_send_ratio = (
+        minimum_inter_send_ms / interval_ms if interval_ms > 0 else 0.0
+    )
+    requested_rate_validated = (
+        sent == planned
+        and planned > 0
+        and requested_rate > 0
+        and actual_rate > 0
+        and absolute_rate_error_pct <= float(args.max_abs_rate_error_pct)
+        and minimum_inter_send_ratio >= float(args.min_inter_send_ratio)
+    )
     all_ok = (
         readiness_ok
         and receiver_returncodes_ok
         and sender_completed.returncode == 0
         and sent > 0
         and sent == planned
+        and (not args.require_rate_validation or requested_rate_validated)
     )
 
     receivers_summary: dict[str, Any] = {}
@@ -479,13 +610,24 @@ def orchestrate(args: argparse.Namespace) -> int:
             "multicast_dataplane_exercised": True,
             "qos_contention_exercised": False,
             "recovery_metrics_exercised": False,
-            "requested_sender_rate_validated": False,
+            "requested_sender_rate_validated": requested_rate_validated,
         },
         "group": args.group,
         "port": args.port,
         "source": {
             "namespace": args.source_namespace,
             "ip": args.source_ip,
+            "sender_cpu": sender_cpu,
+        },
+        "rate_validation": {
+            "required": bool(args.require_rate_validation),
+            "requested_payload_mbps": requested_rate,
+            "actual_payload_mbps": actual_rate,
+            "absolute_rate_error_pct": absolute_rate_error_pct,
+            "maximum_absolute_rate_error_pct": args.max_abs_rate_error_pct,
+            "minimum_inter_send_ratio": minimum_inter_send_ratio,
+            "required_minimum_inter_send_ratio": args.min_inter_send_ratio,
+            "validated": requested_rate_validated,
         },
         "receiver_lifecycle": {
             "mode": "explicit_readiness_sender_completion_drain_stop",
@@ -512,7 +654,10 @@ def orchestrate(args: argparse.Namespace) -> int:
     print(f"S2_DP_DATAPLANE_EXERCISED=True")
     print(f"S2_DP_QOS_CONTENTION_EXERCISED=False")
     print(f"S2_DP_RECOVERY_METRICS_EXERCISED=False")
-    print(f"S2_DP_REQUESTED_SENDER_RATE_VALIDATED=False")
+    print(
+        "S2_DP_REQUESTED_SENDER_RATE_VALIDATED="
+        f"{requested_rate_validated}"
+    )
     if all_ok:
         print("PHASE12_S2_P4_MULTICAST_DATAPLANE_SMOKE_OK")
         return 0
@@ -531,6 +676,12 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--duration", type=float, required=True)
     send.add_argument("--rate-mbps", type=float, required=True)
     send.add_argument("--packet-size", type=int, default=1200)
+    send.add_argument(
+        "--pacing-mode",
+        choices=("minimum_interval_no_catchup", "repeated_sleep_spin"),
+        default="minimum_interval_no_catchup",
+    )
+    send.add_argument("--spin-threshold-us", type=float, default=0.0)
     send.add_argument("--output", required=True)
 
     recv = sub.add_parser("receiver")
@@ -552,6 +703,16 @@ def build_parser() -> argparse.ArgumentParser:
     orch.add_argument("--duration", type=float, default=3.0)
     orch.add_argument("--rate-mbps", type=float, default=2.0)
     orch.add_argument("--packet-size", type=int, default=1200)
+    orch.add_argument(
+        "--pacing-mode",
+        choices=("minimum_interval_no_catchup", "repeated_sleep_spin"),
+        default="minimum_interval_no_catchup",
+    )
+    orch.add_argument("--spin-threshold-us", type=float, default=0.0)
+    orch.add_argument("--sender-cpu", default="none")
+    orch.add_argument("--max-abs-rate-error-pct", type=float, default=5.0)
+    orch.add_argument("--min-inter-send-ratio", type=float, default=0.98)
+    orch.add_argument("--require-rate-validation", action="store_true")
     orch.add_argument("--min-delivery", type=float, default=0.99)
     orch.add_argument("--receiver-ready-timeout-s", type=float, default=10.0)
     orch.add_argument("--receiver-drain-s", type=float, default=1.0)
