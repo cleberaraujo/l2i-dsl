@@ -1428,6 +1428,68 @@ run_s2_p4_autonomous_assurance_validation() {
 }
 
 
+run_s2_multidomain_autonomous_assurance() {
+  require_repo_layout
+
+  local output_dir="${S2_MULTIDOMAIN_ASSURANCE_OUTPUT_DIR:-$REPO_DIR/results/S2/multidomain-assurance-$(date -u +%Y%m%dT%H%M%SZ)}"
+
+  # The dedicated Linux veth is created by the scenario. Netopeer2 and BMv2
+  # remain external services so their process continuity can be measured. The
+  # independent injector receives no controller event or remediation command.
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/s2_multidomain_autonomous_assurance.py" \
+      orchestrate \
+      --output-dir "$output_dir" \
+      --assurance-profile-id "${S2_MULTIDOMAIN_ASSURANCE_PROFILE_ID:-phase17-s2-multidomain-assurance-foundation-v1}" \
+      --linux-device "${S2_MULTIDOMAIN_ASSURANCE_LINUX_DEVICE:-l2i-md-a0}" \
+      --linux-peer "${S2_MULTIDOMAIN_ASSURANCE_LINUX_PEER:-l2i-md-a1}" \
+      --netconf-host "${S2_MULTIDOMAIN_ASSURANCE_NETCONF_HOST:-127.0.0.1}" \
+      --netconf-port "${S2_MULTIDOMAIN_ASSURANCE_NETCONF_PORT:-$NETCONF_PORT}" \
+      --netconf-username "${S2_MULTIDOMAIN_ASSURANCE_NETCONF_USERNAME:-$NETCONF_USER}" \
+      --netconf-key "${S2_MULTIDOMAIN_ASSURANCE_NETCONF_KEY:-$NETCONF_KEY}" \
+      --netconf-timeout-s "${S2_MULTIDOMAIN_ASSURANCE_NETCONF_TIMEOUT_S:-5}" \
+      --p4-addr "$P4_ADDR" \
+      --p4-host 127.0.0.1 \
+      --p4-port "$P4_PORT" \
+      --device-id 0 \
+      --p4-outdir /tmp/l2i_minimal \
+      --group "${S2_MULTIDOMAIN_ASSURANCE_GROUP:-239.1.1.1}" \
+      --group-id "${S2_MULTIDOMAIN_ASSURANCE_GROUP_ID:-1}" \
+      --multicast-ports 1 2 \
+      --multicast-port "${S2_MULTIDOMAIN_ASSURANCE_MULTICAST_PORT:-5001}" \
+      --qos-class "${S2_MULTIDOMAIN_ASSURANCE_QOS_CLASS:-prio10}" \
+      --capacity-mbps "${S2_MULTIDOMAIN_ASSURANCE_CAPACITY_MBPS:-3}" \
+      --minimum-mbps "${S2_MULTIDOMAIN_ASSURANCE_MINIMUM_MBPS:-2}" \
+      --maximum-mbps "${S2_MULTIDOMAIN_ASSURANCE_MAXIMUM_MBPS:-3}" \
+      --fault-after-s "${S2_MULTIDOMAIN_ASSURANCE_FAULT_AFTER_S:-4}" \
+      --maximum-detection-ms "${S2_MULTIDOMAIN_ASSURANCE_MAX_DETECTION_MS:-1500}" \
+      --maximum-control-plane-recovery-ms "${S2_MULTIDOMAIN_ASSURANCE_MAX_CONTROL_PLANE_RECOVERY_MS:-2500}" \
+      --maximum-total-reconciliation-ms "${S2_MULTIDOMAIN_ASSURANCE_MAX_TOTAL_RECONCILIATION_MS:-4000}" \
+      --assurance-poll-interval-s "${S2_MULTIDOMAIN_ASSURANCE_POLL_INTERVAL_S:-0.05}" \
+      --assurance-drift-confirmations "${S2_MULTIDOMAIN_ASSURANCE_DRIFT_CONFIRMATIONS:-3}" \
+      --assurance-convergence-confirmations "${S2_MULTIDOMAIN_ASSURANCE_CONVERGENCE_CONFIRMATIONS:-2}" \
+      --assurance-maximum-remediation-attempts "${S2_MULTIDOMAIN_ASSURANCE_MAX_REMEDIATION_ATTEMPTS:-3}" \
+      --assurance-initial-backoff-s "${S2_MULTIDOMAIN_ASSURANCE_INITIAL_BACKOFF_S:-0.05}" \
+      --assurance-backoff-multiplier "${S2_MULTIDOMAIN_ASSURANCE_BACKOFF_MULTIPLIER:-2}" \
+      --assurance-maximum-backoff-s "${S2_MULTIDOMAIN_ASSURANCE_MAX_BACKOFF_S:-0.5}"
+
+  local rc=$?
+  echo "S2_MULTIDOMAIN_ASSURANCE_OUTPUT_DIR=$output_dir"
+  return "$rc"
+}
+
+
+run_s2_multidomain_autonomous_assurance_foundation() {
+  require_repo_layout
+
+  # Repeat coordinated control-plane assurance across all three real domains.
+  # Candidate classification remains separate from shell operational status.
+  run \
+    "$REPO_DIR/scripts/run_s2_multidomain_autonomous_assurance_foundation.sh" \
+    "${PHASE17_FOUNDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/multidomain-assurance-foundation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
+
 run_s2_p4_state_recovery_foundation() {
   require_repo_layout
 
@@ -1569,6 +1631,8 @@ Ações internas úteis:
   run_s2_p4_autonomous_assurance
   run_s2_p4_autonomous_assurance_foundation
   run_s2_p4_autonomous_assurance_validation
+  run_s2_multidomain_autonomous_assurance
+  run_s2_multidomain_autonomous_assurance_foundation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1629,6 +1693,8 @@ case "${1:-}" in
   run_s2_p4_autonomous_assurance) run_s2_p4_autonomous_assurance ;;
   run_s2_p4_autonomous_assurance_foundation) run_s2_p4_autonomous_assurance_foundation ;;
   run_s2_p4_autonomous_assurance_validation) run_s2_p4_autonomous_assurance_validation ;;
+  run_s2_multidomain_autonomous_assurance) run_s2_multidomain_autonomous_assurance ;;
+  run_s2_multidomain_autonomous_assurance_foundation) run_s2_multidomain_autonomous_assurance_foundation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
