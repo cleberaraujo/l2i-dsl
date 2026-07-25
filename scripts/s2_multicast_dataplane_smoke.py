@@ -153,6 +153,7 @@ def sender(args: argparse.Namespace) -> int:
     send_errors: list[str] = []
     scheduler_lateness_ms: list[float] = []
     inter_send_ms: list[float] = []
+    packet_send_timeline: list[dict[str, int | bool]] = []
     deadline_misses = 0
 
     for seq in range(total_packets):
@@ -172,12 +173,21 @@ def sender(args: argparse.Namespace) -> int:
             inter_send_ms.append((send_ns - previous_send_ns) / 1_000_000.0)
 
         datagram = HEADER.pack(MAGIC, seq, send_ns, total_packets) + filler
+        send_ok = False
         try:
             sock.sendto(datagram, (args.group, args.port))
             sent += 1
+            send_ok = True
         except OSError as exc:
             send_errors.append(f"seq={seq}: {exc}")
 
+        packet_send_timeline.append(
+            {
+                "sequence": int(seq),
+                "send_monotonic_ns": int(send_ns),
+                "sent": bool(send_ok),
+            }
+        )
         previous_send_ns = send_ns
 
         # Never compensate a scheduler pause by transmitting overdue datagrams
@@ -212,6 +222,7 @@ def sender(args: argparse.Namespace) -> int:
         "packets_planned": total_packets,
         "packets_sent": sent,
         "send_errors": send_errors,
+        "packet_send_timeline": packet_send_timeline,
         "started_monotonic_ns": start_ns,
         "completed_monotonic_ns": end_ns,
         "elapsed_s": elapsed_s,
@@ -300,6 +311,7 @@ def receiver(args: argparse.Namespace) -> int:
     sequences: list[int] = []
     unique: set[int] = set()
     delays_ms: list[float] = []
+    packet_receive_timeline: list[dict[str, int | float]] = []
     duplicates = 0
     malformed = 0
     expected_total: int | None = None
@@ -345,6 +357,14 @@ def receiver(args: argparse.Namespace) -> int:
         sequences.append(int(seq))
         delay = max(0.0, (receive_ns - int(send_ns)) / 1_000_000.0)
         delays_ms.append(delay)
+        packet_receive_timeline.append(
+            {
+                "sequence": int(seq),
+                "send_monotonic_ns": int(send_ns),
+                "receive_monotonic_ns": int(receive_ns),
+                "one_way_delay_ms": float(delay),
+            }
+        )
         first_receive_ns = receive_ns if first_receive_ns is None else first_receive_ns
         last_receive_ns = receive_ns
 
@@ -376,6 +396,10 @@ def receiver(args: argparse.Namespace) -> int:
         "duplicates": duplicates,
         "malformed": malformed,
         "received_sequences": sorted(sequences),
+        "packet_receive_timeline": sorted(
+            packet_receive_timeline,
+            key=lambda item: int(item["sequence"]),
+        ),
         "first_receive_monotonic_ns": first_receive_ns,
         "last_receive_monotonic_ns": last_receive_ns,
         "one_way_delay_ms": {

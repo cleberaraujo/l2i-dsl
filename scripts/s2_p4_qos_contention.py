@@ -248,6 +248,7 @@ def background_sender(args: argparse.Namespace) -> int:
     send_errors: list[str] = []
     scheduler_lateness_ms: list[float] = []
     inter_send_ms: list[float] = []
+    packet_send_timeline: list[dict[str, int | bool]] = []
     deadline_misses = 0
 
     for sequence in range(planned):
@@ -265,12 +266,21 @@ def background_sender(args: argparse.Namespace) -> int:
             BACKGROUND_HEADER.pack(BACKGROUND_MAGIC, sequence, send_ns, planned)
             + filler
         )
+        send_ok = False
         try:
             sock.sendto(datagram, (args.destination_ip, args.port))
             sent += 1
+            send_ok = True
         except OSError as exc:
             send_errors.append(f"seq={sequence}: {exc}")
 
+        packet_send_timeline.append(
+            {
+                "sequence": int(sequence),
+                "send_monotonic_ns": int(send_ns),
+                "sent": bool(send_ok),
+            }
+        )
         previous_send_ns = send_ns
 
         # Anchor every new deadline to the actual send time. This prevents a
@@ -286,6 +296,7 @@ def background_sender(args: argparse.Namespace) -> int:
         "source_ip": args.source_ip,
         "destination_ip": args.destination_ip,
         "port": args.port,
+        "packet_send_timeline": packet_send_timeline,
         **sender_metrics(
             sent=sent,
             planned=planned,
@@ -347,6 +358,7 @@ def background_receiver(args: argparse.Namespace) -> int:
     termination_reason = "safety_timeout"
     unique: set[int] = set()
     delays_ms: list[float] = []
+    packet_receive_timeline: list[dict[str, int | float]] = []
     duplicates = 0
     malformed = 0
     expected_total: int | None = None
@@ -388,7 +400,16 @@ def background_receiver(args: argparse.Namespace) -> int:
             continue
 
         unique.add(int(sequence))
-        delays_ms.append(max(0.0, (receive_ns - int(send_ns)) / 1_000_000.0))
+        delay_ms = max(0.0, (receive_ns - int(send_ns)) / 1_000_000.0)
+        delays_ms.append(delay_ms)
+        packet_receive_timeline.append(
+            {
+                "sequence": int(sequence),
+                "send_monotonic_ns": int(send_ns),
+                "receive_monotonic_ns": int(receive_ns),
+                "one_way_delay_ms": float(delay_ms),
+            }
+        )
         first_receive_ns = receive_ns if first_receive_ns is None else first_receive_ns
         last_receive_ns = receive_ns
 
@@ -404,6 +425,10 @@ def background_receiver(args: argparse.Namespace) -> int:
         "duplicates": duplicates,
         "malformed": malformed,
         "received_sequences": sorted(unique),
+        "packet_receive_timeline": sorted(
+            packet_receive_timeline,
+            key=lambda item: int(item["sequence"]),
+        ),
         "first_receive_monotonic_ns": first_receive_ns,
         "last_receive_monotonic_ns": last_receive_ns,
         "lifecycle": {

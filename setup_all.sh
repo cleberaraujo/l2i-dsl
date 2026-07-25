@@ -1257,6 +1257,84 @@ run_s2_p4_qos_contention() {
   return "$rc"
 }
 
+
+run_s2_p4_state_recovery() {
+  require_repo_layout
+
+  local output_dir="${S2_RECOVERY_OUTPUT_DIR:-$REPO_DIR/results/S2/state-recovery-$(date -u +%Y%m%dT%H%M%SZ)}"
+  local group="${S2_RECOVERY_MCAST_DST:-239.1.1.1}"
+  local group_id="${S2_RECOVERY_MCAST_GROUP_ID:-1}"
+  local multicast_port="${S2_RECOVERY_MULTICAST_PORT:-5001}"
+  local control_port="${S2_RECOVERY_CONTROL_PORT:-6001}"
+
+  # The fault model removes only multicast control-plane state. A separate
+  # unicast rule and paced unicast flow remain active as a process-continuity
+  # control, so a multicast outage is not confused with a BMv2 restart.
+  cleanup_topologies_only
+  trap 'cleanup_topologies_only' EXIT INT TERM
+
+  run sudo "$REPO_DIR/scripts/s2_p4_topology_setup.sh"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    trap - EXIT INT TERM
+    cleanup_topologies_only
+    return 0
+  fi
+
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/s2_p4_state_recovery.py" \
+      --output-dir "$output_dir" \
+      --p4-addr "$P4_ADDR" \
+      --p4-host 127.0.0.1 \
+      --p4-port "$P4_PORT" \
+      --device-id 0 \
+      --p4-outdir /tmp/l2i_minimal \
+      --group "$group" \
+      --group-id "$group_id" \
+      --multicast-ports 1 2 \
+      --multicast-port "$multicast_port" \
+      --control-port "$control_port" \
+      --duration "${S2_RECOVERY_DURATION:-14}" \
+      --fault-after-s "${S2_RECOVERY_FAULT_AFTER_S:-4}" \
+      --fault-hold-s "${S2_RECOVERY_FAULT_HOLD_S:-2}" \
+      --minimum-post-s "${S2_RECOVERY_MINIMUM_POST_S:-5}" \
+      --window-guard-s "${S2_RECOVERY_WINDOW_GUARD_S:-0.25}" \
+      --multicast-rate-mbps "${S2_RECOVERY_MULTICAST_RATE_MBPS:-2}" \
+      --control-rate-mbps "${S2_RECOVERY_CONTROL_RATE_MBPS:-0.5}" \
+      --packet-size "${S2_RECOVERY_PACKET_SIZE:-1200}" \
+      --spin-threshold-us "${S2_RECOVERY_SPIN_THRESHOLD_US:-900}" \
+      --multicast-sender-cpu "${S2_RECOVERY_MULTICAST_SENDER_CPU:-auto}" \
+      --control-sender-cpu "${S2_RECOVERY_CONTROL_SENDER_CPU:-auto-distinct}" \
+      --max-abs-rate-error-pct "${S2_RECOVERY_MAX_ABS_RATE_ERROR_PCT:-5}" \
+      --min-inter-send-ratio "${S2_RECOVERY_MIN_INTER_SEND_RATIO:-0.98}" \
+      --minimum-stable-delivery "${S2_RECOVERY_MINIMUM_STABLE_DELIVERY:-0.99}" \
+      --minimum-control-delivery "${S2_RECOVERY_MINIMUM_CONTROL_DELIVERY:-0.99}" \
+      --maximum-fault-delivery "${S2_RECOVERY_MAXIMUM_FAULT_DELIVERY:-0.05}" \
+      --maximum-first-packet-recovery-ms "${S2_RECOVERY_MAXIMUM_FIRST_PACKET_MS:-250}" \
+      --state-readback-timeout-s "${S2_RECOVERY_STATE_READBACK_TIMEOUT_S:-2}" \
+      --state-poll-interval-s "${S2_RECOVERY_STATE_POLL_INTERVAL_S:-0.02}" \
+      --worker-max-runtime-s "${S2_RECOVERY_WORKER_MAX_RUNTIME_S:-120}"
+
+  local rc=$?
+  echo "S2_RECOVERY_OUTPUT_DIR=$output_dir"
+
+  trap - EXIT INT TERM
+  cleanup_topologies_only
+  return "$rc"
+}
+
+
+run_s2_p4_state_recovery_foundation() {
+  require_repo_layout
+
+  # The foundation runner repeats the state-deletion experiment and aggregates
+  # recovery, delivery, and continuity evidence without treating a scientific
+  # candidate decision as an operational shell failure.
+  run \
+    "$REPO_DIR/scripts/run_s2_p4_state_recovery_foundation.sh" \
+    "${PHASE15_FOUNDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/state-recovery-foundation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
 run_s2_p4_qos_contention_semantic_validation() {
   require_repo_layout
 
@@ -1369,6 +1447,8 @@ Ações internas úteis:
   run_s2_p4_dataplane_smoke
   run_s2_p4_qos_contention
   run_s2_p4_qos_contention_semantic_validation
+  run_s2_p4_state_recovery
+  run_s2_p4_state_recovery_foundation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1423,6 +1503,8 @@ case "${1:-}" in
   run_s2_p4_dataplane_smoke) run_s2_p4_dataplane_smoke ;;
   run_s2_p4_qos_contention) run_s2_p4_qos_contention ;;
   run_s2_p4_qos_contention_semantic_validation) run_s2_p4_qos_contention_semantic_validation ;;
+  run_s2_p4_state_recovery) run_s2_p4_state_recovery ;;
+  run_s2_p4_state_recovery_foundation) run_s2_p4_state_recovery_foundation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
