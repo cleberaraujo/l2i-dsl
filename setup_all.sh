@@ -1335,6 +1335,18 @@ run_s2_p4_state_recovery_foundation() {
     "${PHASE15_FOUNDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/state-recovery-foundation-$(date -u +%Y%m%dT%H%M%SZ)}"
 }
 
+
+run_s2_p4_state_recovery_validation() {
+  require_repo_layout
+
+  # Exercise a mirrored timing matrix so recovery is not validated at only one
+  # sender phase or one fault hold duration. The runner preserves every row and
+  # performs an aggregate timing and delivery classification.
+  run \
+    "$REPO_DIR/scripts/run_s2_p4_state_recovery_validation.sh" \
+    "${PHASE15_VALIDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/state-recovery-validation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
 run_s2_p4_qos_contention_semantic_validation() {
   require_repo_layout
 
@@ -1449,6 +1461,7 @@ Ações internas úteis:
   run_s2_p4_qos_contention_semantic_validation
   run_s2_p4_state_recovery
   run_s2_p4_state_recovery_foundation
+  run_s2_p4_state_recovery_validation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1505,6 +1518,7 @@ case "${1:-}" in
   run_s2_p4_qos_contention_semantic_validation) run_s2_p4_qos_contention_semantic_validation ;;
   run_s2_p4_state_recovery) run_s2_p4_state_recovery ;;
   run_s2_p4_state_recovery_foundation) run_s2_p4_state_recovery_foundation ;;
+  run_s2_p4_state_recovery_validation) run_s2_p4_state_recovery_validation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;

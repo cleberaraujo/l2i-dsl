@@ -435,8 +435,17 @@ def window_metrics(
 def first_recovered_packet(
     receiver_timeline: list[dict[str, Any]],
     restoration_confirmed_ns: int,
+    *,
+    remediation_started_ns: int,
+    fault_injection_started_ns: int,
 ) -> dict[str, Any]:
-    """Find the first packet sent after restoration and observed by a receiver."""
+    """Find the first packet sent after restoration and observed by a receiver.
+
+    The three latency origins separate control-plane and dataplane effects. The
+    restoration-confirmed origin measures only dataplane resumption after a
+    successful readback, while the remediation and fault origins retain the
+    complete harness-observed recovery timeline.
+    """
 
     candidates = [
         item
@@ -450,6 +459,8 @@ def first_recovered_packet(
             "send_monotonic_ns": None,
             "receive_monotonic_ns": None,
             "from_restoration_to_receive_ms": None,
+            "from_remediation_start_to_receive_ms": None,
+            "from_fault_start_to_receive_ms": None,
         }
 
     first = min(candidates, key=lambda item: int(item["receive_monotonic_ns"]))
@@ -460,6 +471,12 @@ def first_recovered_packet(
         "receive_monotonic_ns": int(first["receive_monotonic_ns"]),
         "from_restoration_to_receive_ms": (
             int(first["receive_monotonic_ns"]) - restoration_confirmed_ns
+        ) / 1_000_000.0,
+        "from_remediation_start_to_receive_ms": (
+            int(first["receive_monotonic_ns"]) - remediation_started_ns
+        ) / 1_000_000.0,
+        "from_fault_start_to_receive_ms": (
+            int(first["receive_monotonic_ns"]) - fault_injection_started_ns
         ) / 1_000_000.0,
     }
 
@@ -1057,6 +1074,8 @@ def orchestrate(args: argparse.Namespace) -> int:
                 "first_recovered_packet": first_recovered_packet(
                     receiver_timeline,
                     restoration_confirmed_ns,
+                    remediation_started_ns=remediation_started_ns,
+                    fault_injection_started_ns=fault_injection_started_ns,
                 ),
                 "crossing_gap": crossing_gap(
                     receiver_timeline,
