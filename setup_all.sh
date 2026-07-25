@@ -1498,6 +1498,17 @@ run_s2_multidomain_autonomous_assurance_foundation() {
 }
 
 
+run_s2_multidomain_autonomous_assurance_timing_validation() {
+  require_repo_layout
+
+  # Validate immutable calibrated bounds across a mirrored fault-time matrix.
+  # The validation runner never derives new limits from its own observations.
+  run \
+    "$REPO_DIR/scripts/run_s2_multidomain_autonomous_assurance_timing_validation.sh" \
+    "${PHASE17_TIMING_VALIDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/multidomain-assurance-timing-validation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
+
 run_s2_p4_state_recovery_foundation() {
   require_repo_layout
 
@@ -1641,6 +1652,7 @@ Ações internas úteis:
   run_s2_p4_autonomous_assurance_validation
   run_s2_multidomain_autonomous_assurance
   run_s2_multidomain_autonomous_assurance_foundation
+  run_s2_multidomain_autonomous_assurance_timing_validation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1703,6 +1715,7 @@ case "${1:-}" in
   run_s2_p4_autonomous_assurance_validation) run_s2_p4_autonomous_assurance_validation ;;
   run_s2_multidomain_autonomous_assurance) run_s2_multidomain_autonomous_assurance ;;
   run_s2_multidomain_autonomous_assurance_foundation) run_s2_multidomain_autonomous_assurance_foundation ;;
+  run_s2_multidomain_autonomous_assurance_timing_validation) run_s2_multidomain_autonomous_assurance_timing_validation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
