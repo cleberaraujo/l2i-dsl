@@ -1223,7 +1223,7 @@ run_s2_p4_qos_contention() {
       --output-dir "$output_dir" \
       --bottleneck-device "${S2_QOS_BOTTLENECK_DEVICE:-s2b-h3}" \
       --capacity-mbps "${S2_QOS_CAPACITY_MBPS:-3}" \
-      --multicast-reserved-mbps "${S2_QOS_MULTICAST_RESERVED_MBPS:-2}" \
+      --multicast-reserved-mbps "${S2_QOS_MULTICAST_RESERVED_MBPS:-2.1}" \
       --queue-limit-packets "${S2_QOS_QUEUE_LIMIT_PACKETS:-64}" \
       --group "$group" \
       --multicast-port "$multicast_port" \
@@ -1236,6 +1236,7 @@ run_s2_p4_qos_contention() {
       --multicast-rate-mbps "${S2_QOS_MULTICAST_RATE_MBPS:-2}" \
       --background-rate-mbps "${S2_QOS_BACKGROUND_RATE_MBPS:-2}" \
       --packet-size "${S2_QOS_PACKET_SIZE:-1200}" \
+      --tc-overhead-bytes "${S2_QOS_TC_OVERHEAD_BYTES:-42}" \
       --spin-threshold-us "${S2_QOS_SPIN_THRESHOLD_US:-900}" \
       --sender-profile-id "${S2_QOS_SENDER_PROFILE_ID:-phase13-tailspin-900us-affinity-v1}" \
       --multicast-sender-cpu "${S2_QOS_MULTICAST_SENDER_CPU:-auto}" \

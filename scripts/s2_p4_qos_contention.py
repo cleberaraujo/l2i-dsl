@@ -438,6 +438,53 @@ def tc_command(device: str, *arguments: str, check: bool = True) -> dict[str, An
     return command_record(["tc", *arguments, "dev", device], check=check)
 
 
+def expected_tc_rate_accounting(args: argparse.Namespace) -> dict[str, Any]:
+    """Translate payload rates into the byte domain observed by Linux ``tc``.
+
+    The sender reports application payload throughput, while the egress qdisc
+    accounts the complete packet presented by the kernel. The explicit overhead
+    parameter prevents a payload-rate intent from being copied directly into an
+    HTB class whose accounting domain is larger.
+    """
+
+    packet_size = int(args.packet_size)
+    overhead_bytes = int(args.tc_overhead_bytes)
+
+    if packet_size <= 0:
+        fail("packet size must be greater than zero")
+    if overhead_bytes < 0:
+        fail("tc overhead bytes must not be negative")
+
+    tc_packet_size = packet_size + overhead_bytes
+    multicast_payload_rate = float(args.multicast_rate_mbps)
+    background_payload_rate = float(args.background_rate_mbps)
+    multicast_reserved_rate = float(args.multicast_reserved_mbps)
+
+    multicast_tc_rate = (
+        multicast_payload_rate * tc_packet_size / packet_size
+    )
+    background_tc_rate = (
+        background_payload_rate * tc_packet_size / packet_size
+    )
+    reservation_margin = multicast_reserved_rate - multicast_tc_rate
+    reservation_covers = reservation_margin >= -1e-9
+
+    return {
+        "payload_packet_size_bytes": packet_size,
+        "tc_overhead_bytes": overhead_bytes,
+        "tc_accounted_packet_size_bytes": tc_packet_size,
+        "multicast_payload_rate_mbps": multicast_payload_rate,
+        "background_payload_rate_mbps": background_payload_rate,
+        "expected_multicast_tc_rate_mbps": multicast_tc_rate,
+        "expected_background_tc_rate_mbps": background_tc_rate,
+        "expected_aggregate_tc_rate_mbps": multicast_tc_rate + background_tc_rate,
+        "configured_multicast_reserved_mbps": multicast_reserved_rate,
+        "configured_reservation_margin_mbps": reservation_margin,
+        "configured_multicast_reservation_covers_expected_load": reservation_covers,
+        "accounting_domain": "linux_tc_egress_packet_bytes",
+    }
+
+
 def configure_bottleneck(args: argparse.Namespace) -> dict[str, Any]:
     """Create the baseline or differentiated HTB hierarchy."""
 
@@ -445,6 +492,7 @@ def configure_bottleneck(args: argparse.Namespace) -> dict[str, Any]:
     capacity = float(args.capacity_mbps)
     multicast_rate = float(args.multicast_reserved_mbps)
     background_rate = capacity - multicast_rate
+    rate_accounting = expected_tc_rate_accounting(args)
 
     if capacity <= 0.0:
         fail("bottleneck capacity must be greater than zero")
@@ -452,8 +500,21 @@ def configure_bottleneck(args: argparse.Namespace) -> dict[str, Any]:
         fail("multicast reserved rate must be between zero and the capacity")
     if int(args.queue_limit_packets) <= 0:
         fail("queue limit must be greater than zero")
+    if (
+        args.mode == "adapt"
+        and not rate_accounting[
+            "configured_multicast_reservation_covers_expected_load"
+        ]
+    ):
+        fail(
+            "multicast HTB reservation does not cover the payload rate after "
+            "translation into the Linux tc accounting domain"
+        )
 
-    limit_bytes = int(args.queue_limit_packets) * int(args.packet_size)
+    limit_bytes = (
+        int(args.queue_limit_packets)
+        * int(rate_accounting["tc_accounted_packet_size_bytes"])
+    )
     commands: list[dict[str, Any]] = []
 
     # A clean root guarantees that every run starts with empty class counters.
@@ -589,6 +650,7 @@ def configure_bottleneck(args: argparse.Namespace) -> dict[str, Any]:
         "background_reserved_mbps": background_rate if args.mode == "adapt" else None,
         "queue_limit_packets": int(args.queue_limit_packets),
         "queue_limit_bytes": limit_bytes,
+        "rate_accounting": rate_accounting,
         "commands": commands,
         "readback": readback,
         "hierarchy_ok": hierarchy_ok,
@@ -681,6 +743,71 @@ def parse_class_counters(state: dict[str, Any]) -> dict[str, dict[str, int]]:
                 "overlimits": int(sent_match.group(4)),
             }
     return counters
+
+
+def observed_tc_rate_accounting(
+    *,
+    mode: str,
+    class_counters: dict[str, dict[str, int]],
+    multicast_sender: dict[str, Any],
+    background_sender: dict[str, Any],
+    configuration: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive the actual qdisc accounting rates from archived class counters."""
+
+    packet_size = int(multicast_sender.get("packet_size_bytes") or 0)
+    multicast_payload_rate = float(
+        multicast_sender.get("rate_payload_mbps_actual") or 0.0
+    )
+    background_payload_rate = float(
+        background_sender.get("rate_payload_mbps_actual") or 0.0
+    )
+
+    def class_measurement(classid: str, payload_rate: float) -> dict[str, Any]:
+        counter = class_counters.get(classid) or {}
+        packets = int(counter.get("packets") or 0)
+        byte_count = int(counter.get("bytes") or 0)
+        bytes_per_packet = byte_count / packets if packets > 0 else 0.0
+        required_tc_rate = (
+            payload_rate * bytes_per_packet / packet_size
+            if packet_size > 0 and bytes_per_packet > 0.0
+            else 0.0
+        )
+        return {
+            "classid": classid,
+            "packets": packets,
+            "bytes": byte_count,
+            "bytes_per_packet": bytes_per_packet,
+            "required_tc_rate_mbps": required_tc_rate,
+            "drops": int(counter.get("drops") or 0),
+            "overlimits": int(counter.get("overlimits") or 0),
+        }
+
+    if mode == "adapt":
+        multicast = class_measurement("1:10", multicast_payload_rate)
+        background = class_measurement("1:30", background_payload_rate)
+        reserved = float(configuration.get("multicast_reserved_mbps") or 0.0)
+        margin = reserved - float(multicast["required_tc_rate_mbps"])
+        covers = (
+            multicast["packets"] > 0
+            and multicast["bytes"] > 0
+            and margin >= -1e-9
+        )
+    else:
+        multicast = None
+        background = None
+        reserved = None
+        margin = None
+        covers = None
+
+    return {
+        "mode": mode,
+        "multicast_class": multicast,
+        "background_class": background,
+        "configured_multicast_reserved_mbps": reserved,
+        "observed_multicast_reservation_margin_mbps": margin,
+        "observed_multicast_reservation_covers_load": covers,
+    }
 
 
 def wait_for_file(path: Path, processes: Sequence[subprocess.Popen[str]], timeout_s: float) -> bool:
@@ -931,6 +1058,29 @@ def orchestrate(args: argparse.Namespace) -> int:
         and bg_min_inter_send_ratio >= float(args.min_inter_send_ratio)
     )
 
+    observed_rate_accounting = observed_tc_rate_accounting(
+        mode=args.mode,
+        class_counters=class_counters,
+        multicast_sender=mcast_sender,
+        background_sender=background_sender_data,
+        configuration=tc_configuration,
+    )
+    configured_rate_accounting = tc_configuration.get("rate_accounting") or {}
+    configured_accounting_ok = (
+        args.mode == "baseline"
+        or configured_rate_accounting.get(
+            "configured_multicast_reservation_covers_expected_load"
+        )
+        is True
+    )
+    observed_accounting_ok = (
+        args.mode == "baseline"
+        or observed_rate_accounting.get(
+            "observed_multicast_reservation_covers_load"
+        )
+        is True
+    )
+
     expected_classes = {"1:30"} if args.mode == "baseline" else {"1:10", "1:30"}
     class_activity_ok = all(
         int((class_counters.get(classid) or {}).get("packets") or 0) > 0
@@ -971,6 +1121,8 @@ def orchestrate(args: argparse.Namespace) -> int:
             receiver_lifecycle_ok,
             receiver_integrity_ok,
             class_activity_ok,
+            configured_accounting_ok,
+            observed_accounting_ok,
         )
     )
 
@@ -989,6 +1141,16 @@ def orchestrate(args: argparse.Namespace) -> int:
                 mcast_rate_validation.get("validated")
             ),
             "requested_background_rate_validated": bg_rate_validated,
+            "tc_rate_accounting_model_applied": True,
+            "tc_multicast_reservation_exercised": args.mode == "adapt",
+            "tc_multicast_reservation_covers_observed_load": (
+                observed_rate_accounting.get(
+                    "observed_multicast_reservation_covers_load"
+                )
+                if args.mode == "adapt"
+                else None
+            ),
+            "sustained_qos_isolation_validated": False,
             "baseline_adapt_comparison_validated": False,
             "recovery_metrics_exercised": False,
         },
@@ -1043,6 +1205,10 @@ def orchestrate(args: argparse.Namespace) -> int:
             "configuration": tc_configuration,
             "state_after": tc_after,
             "class_counters": class_counters,
+            "rate_accounting": {
+                "configured": configured_rate_accounting,
+                "observed": observed_rate_accounting,
+            },
             "expected_active_classes": sorted(expected_classes),
             "class_activity_ok": class_activity_ok,
         },
@@ -1077,6 +1243,8 @@ def orchestrate(args: argparse.Namespace) -> int:
             "receiver_lifecycle_ok": receiver_lifecycle_ok,
             "receiver_integrity_ok": receiver_integrity_ok,
             "shared_class_activity_ok": class_activity_ok,
+            "configured_rate_accounting_ok": configured_accounting_ok,
+            "observed_rate_accounting_ok": observed_accounting_ok,
         },
         "passed": bool(operational_ok),
     }
@@ -1103,6 +1271,30 @@ def orchestrate(args: argparse.Namespace) -> int:
     )
     print(f"PHASE14_CONTENTION_BACKGROUND_DELIVERY_RATIO={bg_delivery_ratio:.6f}")
     print(f"PHASE14_CONTENTION_CLASS_ACTIVITY_OK={class_activity_ok}")
+    print(
+        "PHASE14_CONTENTION_CONFIGURED_RATE_ACCOUNTING_OK="
+        f"{configured_accounting_ok}"
+    )
+    print(
+        "PHASE14_CONTENTION_OBSERVED_RATE_ACCOUNTING_OK="
+        f"{observed_accounting_ok}"
+    )
+    if args.mode == "adapt":
+        observed_multicast = (
+            observed_rate_accounting.get("multicast_class") or {}
+        )
+        print(
+            "PHASE14_CONTENTION_OBSERVED_MCAST_TC_BYTES_PER_PACKET="
+            f"{float(observed_multicast.get('bytes_per_packet') or 0.0):.6f}"
+        )
+        print(
+            "PHASE14_CONTENTION_OBSERVED_MCAST_TC_RATE_REQUIRED_MBPS="
+            f"{float(observed_multicast.get('required_tc_rate_mbps') or 0.0):.9f}"
+        )
+        print(
+            "PHASE14_CONTENTION_MCAST_RESERVATION_MARGIN_MBPS="
+            f"{float(observed_rate_accounting.get('observed_multicast_reservation_margin_mbps') or 0.0):.9f}"
+        )
     print("PHASE14_CONTENTION_P4_INTERNAL_QUEUEING_EXERCISED=False")
     print("PHASE14_CONTENTION_LINUX_TC_EGRESS_QOS_EXERCISED=True")
     print(f"PHASE14_CONTENTION_SUMMARY={summary_path}")
@@ -1144,7 +1336,7 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument("--output-dir", required=True)
     orchestrator.add_argument("--bottleneck-device", default="s2b-h3")
     orchestrator.add_argument("--capacity-mbps", type=float, default=3.0)
-    orchestrator.add_argument("--multicast-reserved-mbps", type=float, default=2.0)
+    orchestrator.add_argument("--multicast-reserved-mbps", type=float, default=2.1)
     orchestrator.add_argument("--queue-limit-packets", type=int, default=64)
     orchestrator.add_argument("--group", default="239.1.1.1")
     orchestrator.add_argument("--multicast-port", type=int, default=5001)
@@ -1157,6 +1349,7 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument("--multicast-rate-mbps", type=float, default=2.0)
     orchestrator.add_argument("--background-rate-mbps", type=float, default=2.0)
     orchestrator.add_argument("--packet-size", type=int, default=1200)
+    orchestrator.add_argument("--tc-overhead-bytes", type=int, default=42)
     orchestrator.add_argument("--spin-threshold-us", type=float, default=900.0)
     orchestrator.add_argument(
         "--sender-profile-id",
