@@ -1,4 +1,4 @@
-i"""
+"""
 L2i – Layer 2 Intent Framework
 
 Autor: Antônio Cleber de Sousa Araújo
