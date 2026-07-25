@@ -1509,6 +1509,18 @@ run_s2_multidomain_autonomous_assurance_timing_validation() {
 }
 
 
+run_s2_multidomain_autonomous_assurance_final_timing_validation() {
+  require_repo_layout
+
+  # Validate the recalibrated end-to-end detection bound and its explicit
+  # sub-metrics on an independent mirrored matrix. No bound is derived from
+  # the validation observations produced by this runner.
+  run \
+    "$REPO_DIR/scripts/run_s2_multidomain_autonomous_assurance_final_timing_validation.sh" \
+    "${PHASE17_FINAL_TIMING_VALIDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/multidomain-assurance-final-timing-validation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
+
 run_s2_p4_state_recovery_foundation() {
   require_repo_layout
 
@@ -1653,6 +1665,7 @@ Ações internas úteis:
   run_s2_multidomain_autonomous_assurance
   run_s2_multidomain_autonomous_assurance_foundation
   run_s2_multidomain_autonomous_assurance_timing_validation
+  run_s2_multidomain_autonomous_assurance_final_timing_validation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1716,6 +1729,7 @@ case "${1:-}" in
   run_s2_multidomain_autonomous_assurance) run_s2_multidomain_autonomous_assurance ;;
   run_s2_multidomain_autonomous_assurance_foundation) run_s2_multidomain_autonomous_assurance_foundation ;;
   run_s2_multidomain_autonomous_assurance_timing_validation) run_s2_multidomain_autonomous_assurance_timing_validation ;;
+  run_s2_multidomain_autonomous_assurance_final_timing_validation) run_s2_multidomain_autonomous_assurance_final_timing_validation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
