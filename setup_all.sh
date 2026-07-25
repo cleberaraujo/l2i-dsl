@@ -1180,6 +1180,7 @@ run_s2_p4_qos_contention() {
   local group_id="${S2_QOS_MCAST_GROUP_ID:-1}"
   local multicast_port="${S2_QOS_MULTICAST_PORT:-5001}"
   local background_port="${S2_QOS_BACKGROUND_PORT:-6001}"
+  local qos_profile_id="${S2_QOS_PROFILE_ID:-phase14-s2-p4-qos-contention-v1}"
 
   # The current P4 pipeline performs forwarding and replication only. The
   # shared bottleneck and QoS classes are created on the Linux receiver-B
@@ -1228,10 +1229,11 @@ run_s2_p4_qos_contention() {
       --group "$group" \
       --multicast-port "$multicast_port" \
       --background-port "$background_port" \
-      --duration "${S2_QOS_DURATION:-3}" \
-      --background-duration "${S2_QOS_BACKGROUND_DURATION:-7}" \
-      --background-prefill-s "${S2_QOS_BACKGROUND_PREFILL_S:-0.5}" \
-      --background-drain-s "${S2_QOS_BACKGROUND_DRAIN_S:-0.5}" \
+      --qos-profile-id "$qos_profile_id" \
+      --duration "${S2_QOS_DURATION:-12}" \
+      --background-duration "${S2_QOS_BACKGROUND_DURATION:-18}" \
+      --background-prefill-s "${S2_QOS_BACKGROUND_PREFILL_S:-1.5}" \
+      --background-drain-s "${S2_QOS_BACKGROUND_DRAIN_S:-1.5}" \
       --multicast-receiver-drain-s "${S2_QOS_MULTICAST_RECEIVER_DRAIN_S:-1}" \
       --multicast-rate-mbps "${S2_QOS_MULTICAST_RATE_MBPS:-2}" \
       --background-rate-mbps "${S2_QOS_BACKGROUND_RATE_MBPS:-2}" \
@@ -1245,7 +1247,7 @@ run_s2_p4_qos_contention() {
       --min-inter-send-ratio "${S2_QOS_MIN_INTER_SEND_RATIO:-0.98}" \
       --worker-ready-timeout-s "${S2_QOS_WORKER_READY_TIMEOUT_S:-10}" \
       --worker-stop-timeout-s "${S2_QOS_WORKER_STOP_TIMEOUT_S:-5}" \
-      --worker-max-runtime-s "${S2_QOS_WORKER_MAX_RUNTIME_S:-120}"
+      --worker-max-runtime-s "${S2_QOS_WORKER_MAX_RUNTIME_S:-180}"
 
   local rc=$?
   echo "S2_QOS_OUTPUT_DIR=$output_dir"
@@ -1253,6 +1255,19 @@ run_s2_p4_qos_contention() {
   trap - EXIT INT TERM
   cleanup_topologies_only
   return "$rc"
+}
+
+run_s2_p4_qos_contention_semantic_validation() {
+  require_repo_layout
+
+  # Run the validated, counterbalanced baseline/adapt matrix. The runner invokes
+  # the per-mode setup command and stores every execution under one evidence
+  # directory so the comparison can be reproduced without manual ordering.
+  local output_dir="${PHASE14_SEMANTIC_OUTPUT_DIR:-$REPO_DIR/results/S2/qos-contention-semantic-$(date -u +%Y%m%dT%H%M%SZ)}"
+
+  run \
+    "$REPO_DIR/scripts/run_s2_p4_qos_contention_semantic_validation.sh" \
+    "$output_dir"
 }
 
 # -------------------------------
@@ -1353,6 +1368,7 @@ Ações internas úteis:
   push_p4_pipeline
   run_s2_p4_dataplane_smoke
   run_s2_p4_qos_contention
+  run_s2_p4_qos_contention_semantic_validation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1406,6 +1422,7 @@ case "${1:-}" in
   run_s2_real) run_s2_real ;;
   run_s2_p4_dataplane_smoke) run_s2_p4_dataplane_smoke ;;
   run_s2_p4_qos_contention) run_s2_p4_qos_contention ;;
+  run_s2_p4_qos_contention_semantic_validation) run_s2_p4_qos_contention_semantic_validation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;

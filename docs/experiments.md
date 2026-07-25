@@ -323,3 +323,56 @@ S2_DP_REQUIRE_RATE_VALIDATION=0 \
 Essa opção não deve ser usada para sustentar afirmações sobre precisão da carga
 oferecida. O perfil calibra a taxa do emissor e a replicação multicast; ele não
 constitui, isoladamente, validação de QoS sob contenção nem de recuperação.
+
+
+---
+
+# 🎛️ 11. Perfil validado de contenção multicast S2/P4
+
+O experimento de contenção multicast utiliza o perfil
+`phase14-s2-p4-qos-contention-v1`. O BMv2 realiza a replicação multicast e o
+encaminhamento unicast do tráfego concorrente, enquanto o Linux `tc` materializa
+a contenção e a diferenciação no egresso compartilhado `s2b-h3`. O perfil não
+atribui ao pipeline P4 mecanismos internos de filas, escalonamento ou garantia
+de banda.
+
+A matriz completa, com quatro repetições por modo e ordem contrabalanceada, pode
+ser executada por:
+
+```bash
+./setup_all.sh run_s2_p4_qos_contention_semantic_validation
+```
+
+Os padrões promovidos para o experimento por modo são:
+
+```text
+S2_QOS_PROFILE_ID=phase14-s2-p4-qos-contention-v1
+S2_QOS_CAPACITY_MBPS=3
+S2_QOS_MULTICAST_RATE_MBPS=2
+S2_QOS_MULTICAST_RESERVED_MBPS=2.1
+S2_QOS_BACKGROUND_RATE_MBPS=2
+S2_QOS_PACKET_SIZE=1200
+S2_QOS_TC_OVERHEAD_BYTES=42
+S2_QOS_QUEUE_LIMIT_PACKETS=64
+S2_QOS_DURATION=12
+S2_QOS_BACKGROUND_DURATION=18
+S2_QOS_BACKGROUND_PREFILL_S=1.5
+S2_QOS_BACKGROUND_DRAIN_S=1.5
+```
+
+A reserva de `2.1 Mbit/s` está no domínio de contabilização do `tc`. Para um
+datagrama de payload de 1.200 bytes, os 42 bytes adicionais representam os
+cabeçalhos Ethernet, IPv4 e UDP observados no ponto de enfileiramento, resultando
+em 1.242 bytes contabilizados por pacote e em uma taxa esperada de
+aproximadamente `2.07 Mbit/s` para uma carga útil de `2 Mbit/s`.
+
+Na validação contrabalanceada, o baseline apresentou entrega mediana de `0.811`
+no receptor B e p95 mediano de `213.210 ms`. O modo adapt apresentou entrega
+integral em todas as execuções, p95 mediano de `1.635 ms`, margem mínima de
+reserva de `0.032219 Mbit/s` e zero drops na classe multicast. O receptor C,
+utilizado como controle não contendido, manteve entrega integral nos dois modos.
+
+O perfil completo, os critérios de validação e o escopo das afirmações estão em
+[`profiles/s2_qos_contention_profile.json`](../profiles/s2_qos_contention_profile.json).
+A validação abrange diferenciação de QoS no egresso Linux compartilhado. Ela não
+valida filas internas do P4 nem mecanismos de recuperação.

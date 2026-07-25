@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase14-s2-p4-qos-contention-v1",
+  "scenario": "S2_P4_multicast_qos_contention",
+  "selection_status": "production_confirmed",
+  "topology": {
+    "shared_receiver": "B",
+    "control_receiver": "C",
+    "shared_linux_egress_device": "s2b-h3",
+    "p4_multicast_egress_ports": [
+      1,
+      2
+    ],
+    "p4_background_ingress_port": 3,
+    "p4_background_egress_port": 1
+  },
+  "runtime": {
+    "mode_comparison": [
+      "baseline",
+      "adapt"
+    ],
+    "capacity_tc_mbps": 3.0,
+    "multicast_payload_rate_mbps": 2.0,
+    "multicast_reserved_tc_mbps": 2.1,
+    "background_payload_rate_mbps": 2.0,
+    "payload_packet_size_bytes": 1200,
+    "tc_overhead_bytes": 42,
+    "tc_accounted_packet_size_bytes": 1242,
+    "expected_multicast_tc_rate_mbps": 2.07,
+    "queue_limit_packets": 64,
+    "multicast_duration_s": 12.0,
+    "background_duration_s": 18.0,
+    "background_prefill_s": 1.5,
+    "background_drain_s": 1.5,
+    "sender_profile_id": "phase13-tailspin-900us-affinity-v1",
+    "multicast_sender_cpu": "auto",
+    "background_sender_cpu": "auto-distinct"
+  },
+  "validation_design": {
+    "repetitions_per_mode": 4,
+    "counterbalanced_order": [
+      "baseline",
+      "adapt",
+      "adapt",
+      "baseline",
+      "baseline",
+      "adapt",
+      "adapt",
+      "baseline"
+    ],
+    "minimum_receiver_delivery_ratio": 0.99,
+    "minimum_control_delivery_ratio": 0.99,
+    "minimum_delivery_gain": 0.05,
+    "maximum_adapt_to_baseline_p95_ratio": 0.5,
+    "minimum_sustained_duration_s": 10.0,
+    "maximum_multicast_class_drops": 0
+  },
+  "semantic_validation": {
+    "baseline_valid_runs": 4,
+    "adapt_valid_runs": 4,
+    "baseline_median_receiver_b_delivery_ratio": 0.811,
+    "baseline_minimum_receiver_b_delivery_ratio": 0.766,
+    "adapt_median_receiver_b_delivery_ratio": 1.0,
+    "adapt_minimum_receiver_b_delivery_ratio": 1.0,
+    "baseline_minimum_receiver_c_delivery_ratio": 1.0,
+    "adapt_minimum_receiver_c_delivery_ratio": 1.0,
+    "baseline_median_receiver_b_p95_ms": 213.21002775,
+    "adapt_median_receiver_b_p95_ms": 1.63489565,
+    "baseline_median_background_delivery_ratio": 0.777733333,
+    "adapt_median_background_delivery_ratio": 0.652,
+    "maximum_required_multicast_tc_rate_mbps": 2.067780757,
+    "minimum_multicast_reservation_margin_mbps": 0.032219243,
+    "median_multicast_tc_bytes_per_packet": 1242.0,
+    "maximum_adapt_multicast_class_drops": 0,
+    "maximum_baseline_shared_class_drops": 1311
+  },
+  "validated_properties": {
+    "contention_observed": true,
+    "control_path_stable": true,
+    "delivery_isolation": true,
+    "latency_isolation": true,
+    "semantic_rate_accounting": true,
+    "sustained_adapt_delivery": true
+  },
+  "scope": {
+    "p4_multicast_replication_exercised": true,
+    "p4_unicast_background_forwarding_exercised": true,
+    "linux_tc_shared_egress_contention_exercised": true,
+    "linux_tc_qos_differentiation_validated": true,
+    "linux_tc_semantic_rate_accounting_validated": true,
+    "p4_internal_queueing_validated": false,
+    "recovery_validated": false
+  },
+  "notes": [
+    "P4 performs multicast replication and background unicast forwarding; Linux tc materializes the shared-egress queueing policy.",
+    "The 2.1 Mbit/s multicast reservation is expressed in the tc byte-accounting domain, not as payload throughput.",
+    "Receiver C is an uncontended control path and remained at full delivery in every baseline and adapt run.",
+    "The adapt result was sustained for 12 seconds with zero multicast-class drops and a positive observed reservation margin."
+  ]
+}

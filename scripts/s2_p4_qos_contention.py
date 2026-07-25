@@ -1127,7 +1127,8 @@ def orchestrate(args: argparse.Namespace) -> int:
     )
 
     summary = {
-        "scenario": "S2_P4_multicast_qos_contention_foundation",
+        "scenario": "S2_P4_multicast_qos_contention",
+        "qos_profile_id": args.qos_profile_id,
         "mode": args.mode,
         "scope": {
             "multicast_control_plane_programmed": True,
@@ -1297,6 +1298,7 @@ def orchestrate(args: argparse.Namespace) -> int:
         )
     print("PHASE14_CONTENTION_P4_INTERNAL_QUEUEING_EXERCISED=False")
     print("PHASE14_CONTENTION_LINUX_TC_EGRESS_QOS_EXERCISED=True")
+    print(f"PHASE14_CONTENTION_QOS_PROFILE_ID={args.qos_profile_id}")
     print(f"PHASE14_CONTENTION_SUMMARY={summary_path}")
 
     if operational_ok:
@@ -1341,10 +1343,14 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument("--group", default="239.1.1.1")
     orchestrator.add_argument("--multicast-port", type=int, default=5001)
     orchestrator.add_argument("--background-port", type=int, default=6001)
-    orchestrator.add_argument("--duration", type=float, default=3.0)
-    orchestrator.add_argument("--background-duration", type=float, default=7.0)
-    orchestrator.add_argument("--background-prefill-s", type=float, default=0.5)
-    orchestrator.add_argument("--background-drain-s", type=float, default=0.5)
+    orchestrator.add_argument(
+        "--qos-profile-id",
+        default="phase14-s2-p4-qos-contention-v1",
+    )
+    orchestrator.add_argument("--duration", type=float, default=12.0)
+    orchestrator.add_argument("--background-duration", type=float, default=18.0)
+    orchestrator.add_argument("--background-prefill-s", type=float, default=1.5)
+    orchestrator.add_argument("--background-drain-s", type=float, default=1.5)
     orchestrator.add_argument("--multicast-receiver-drain-s", type=float, default=1.0)
     orchestrator.add_argument("--multicast-rate-mbps", type=float, default=2.0)
     orchestrator.add_argument("--background-rate-mbps", type=float, default=2.0)
@@ -1361,7 +1367,7 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator.add_argument("--min-inter-send-ratio", type=float, default=0.98)
     orchestrator.add_argument("--worker-ready-timeout-s", type=float, default=10.0)
     orchestrator.add_argument("--worker-stop-timeout-s", type=float, default=5.0)
-    orchestrator.add_argument("--worker-max-runtime-s", type=float, default=120.0)
+    orchestrator.add_argument("--worker-max-runtime-s", type=float, default=180.0)
     orchestrator.add_argument("--multicast-source-namespace", default="h1")
     orchestrator.add_argument("--multicast-source-ip", default="10.0.0.1")
     orchestrator.add_argument("--background-source-namespace", default="h2")
