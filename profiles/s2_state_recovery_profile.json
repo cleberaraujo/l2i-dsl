@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase15-s2-p4-state-recovery-v1",
+  "scenario": "S2_P4_multicast_state_recovery",
+  "selection_status": "production_confirmed",
+  "fault_model": "p4runtime_multicast_table_and_pre_state_deletion",
+  "topology": {
+    "multicast_source_namespace": "h1",
+    "multicast_receivers": {
+      "B": "h3",
+      "C": "h4"
+    },
+    "multicast_group": "239.1.1.1",
+    "multicast_group_id": 1,
+    "multicast_egress_ports": [
+      1,
+      2
+    ],
+    "unicast_control_source_namespace": "h2",
+    "unicast_control_receiver_namespace": "h3",
+    "unicast_control_ingress_port": 3,
+    "unicast_control_egress_port": 1
+  },
+  "runtime": {
+    "multicast_payload_rate_mbps": 2.0,
+    "unicast_control_payload_rate_mbps": 0.5,
+    "payload_packet_size_bytes": 1200,
+    "sender_profile_id": "phase13-tailspin-900us-affinity-v1",
+    "spin_threshold_us": 900.0,
+    "multicast_sender_cpu": "auto",
+    "control_sender_cpu": "auto-distinct",
+    "minimum_post_recovery_s": 5.0,
+    "window_guard_s": 0.25,
+    "minimum_stable_delivery_ratio": 0.99,
+    "minimum_control_delivery_ratio": 0.99,
+    "maximum_fault_window_delivery_ratio": 0.05,
+    "maximum_first_packet_after_restoration_ms": 50.0,
+    "state_readback_timeout_s": 2.0,
+    "state_poll_interval_s": 0.02
+  },
+  "validation_design": {
+    "run_count": 8,
+    "mirrored_condition_order": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "D",
+      "C",
+      "B",
+      "A"
+    ],
+    "conditions": {
+      "A": {
+        "fault_after_s": 3.0,
+        "fault_hold_s": 0.5,
+        "duration_s": 12.0
+      },
+      "B": {
+        "fault_after_s": 4.5,
+        "fault_hold_s": 1.0,
+        "duration_s": 14.0
+      },
+      "C": {
+        "fault_after_s": 5.0,
+        "fault_hold_s": 2.0,
+        "duration_s": 15.0
+      },
+      "D": {
+        "fault_after_s": 4.0,
+        "fault_hold_s": 3.0,
+        "duration_s": 15.0
+      }
+    },
+    "thresholds_ms": {
+      "maximum_absence_detection": 50.0,
+      "maximum_control_plane_recovery": 50.0,
+      "maximum_first_packet_after_restoration": 50.0,
+      "maximum_remediation_to_receive": 75.0,
+      "maximum_outage_excess": 100.0
+    }
+  },
+  "timing_validation": {
+    "valid_runs": 8,
+    "absence_detection_median_ms": 8.258596,
+    "absence_detection_max_ms": 8.873034,
+    "control_plane_recovery_median_ms": 8.957522,
+    "control_plane_recovery_max_ms": 10.111969,
+    "receiver_b_first_packet_after_restoration_max_ms": 6.049812,
+    "receiver_c_first_packet_after_restoration_max_ms": 5.946215,
+    "receiver_b_remediation_to_receive_max_ms": 15.298246,
+    "receiver_c_remediation_to_receive_max_ms": 15.236951,
+    "receiver_b_outage_excess_max_ms": 97.33849,
+    "receiver_c_outage_excess_max_ms": 97.096478,
+    "receiver_b_pre_fault_minimum_delivery_ratio": 1.0,
+    "receiver_b_fault_maximum_delivery_ratio": 0.0,
+    "receiver_b_post_recovery_minimum_delivery_ratio": 1.0,
+    "receiver_c_pre_fault_minimum_delivery_ratio": 1.0,
+    "receiver_c_fault_maximum_delivery_ratio": 0.0,
+    "receiver_c_post_recovery_minimum_delivery_ratio": 1.0,
+    "unicast_control_minimum_delivery_ratio": 1.0
+  },
+  "validated_properties": {
+    "selective_multicast_state_loss_effect": true,
+    "p4runtime_absence_detection": true,
+    "desired_state_rematerialization": true,
+    "multicast_dataplane_resumption": true,
+    "unicast_control_continuity": true,
+    "bmv2_process_continuity": true,
+    "fault_timing_variation": true,
+    "fault_hold_duration_variation": true,
+    "outage_tracks_deliberate_hold_duration": true
+  },
+  "scope": {
+    "p4runtime_multicast_table_state_deletion_exercised": true,
+    "p4runtime_pre_group_state_deletion_exercised": true,
+    "test_harness_triggered_detection": true,
+    "test_harness_triggered_recovery": true,
+    "autonomous_mad_detection_validated": false,
+    "autonomous_mad_recovery_validated": false,
+    "bmv2_process_restart_exercised": false,
+    "pipeline_reload_exercised": false,
+    "qos_contention_exercised": false
+  },
+  "notes": [
+    "The harness deletes the multicast table entry and PRE group in one P4Runtime WriteRequest, confirms absence by readback, waits for the configured hold interval, and rematerializes the desired state.",
+    "A separate unicast rule and paced unicast flow remain active during the multicast outage, distinguishing selective multicast state loss from a BMv2 process failure.",
+    "The measured outage includes the deliberately configured fault hold interval; the hold interval is not recovery latency.",
+    "The profile validates harness-triggered recovery only. It does not claim autonomous MAD detection or autonomous MAD remediation.",
+    "The profile does not exercise BMv2 restart or forwarding-pipeline reload."
+  ]
+}

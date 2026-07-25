@@ -48,6 +48,7 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   > "$OUTPUT_DIR/manifest.tsv"
 
 {
+  echo "recovery_profile_id=${PHASE15_VALIDATION_PROFILE_ID:-phase15-s2-p4-state-recovery-v1}"
   echo "validation_type=mirrored_fault_timing_and_hold_matrix"
   echo "expected_run_count=8"
   echo "maximum_absence_detection_ms=$MAX_ABSENCE_MS"
@@ -105,6 +106,7 @@ do
   timeout "$RUN_TIMEOUT_S" \
     env \
       S2_RECOVERY_OUTPUT_DIR="$run_dir" \
+      S2_RECOVERY_PROFILE_ID="${PHASE15_VALIDATION_PROFILE_ID:-phase15-s2-p4-state-recovery-v1}" \
       S2_RECOVERY_DURATION="$duration_s" \
       S2_RECOVERY_FAULT_AFTER_S="$fault_after_s" \
       S2_RECOVERY_FAULT_HOLD_S="$fault_hold_s" \
@@ -231,7 +233,9 @@ for row in rows:
     )
 
     content_ok = (
-        summary.get("scenario") == "S2_P4_multicast_state_recovery_foundation"
+        summary.get("scenario") == "S2_P4_multicast_state_recovery"
+        and summary.get("recovery_profile_id")
+        == "phase15-s2-p4-state-recovery-v1"
         and summary.get("fault_model")
         == "p4runtime_multicast_table_and_pre_state_deletion"
         and summary.get("passed") is True
@@ -434,6 +438,7 @@ print("PHASE15_VALIDATION_AUTONOMOUS_MAD_RECOVERY_VALIDATED=False")
 
 summary = {
     "scenario": "phase15_state_recovery_timing_validation",
+    "recovery_profile_id": "phase15-s2-p4-state-recovery-v1",
     "validation_design": {
         "run_count": 8,
         "mirrored_condition_order": list(expected_order),

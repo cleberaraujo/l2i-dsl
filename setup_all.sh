@@ -1284,6 +1284,7 @@ run_s2_p4_state_recovery() {
   run_python_script_as_root \
     "$REPO_DIR/scripts/s2_p4_state_recovery.py" \
       --output-dir "$output_dir" \
+      --recovery-profile-id "${S2_RECOVERY_PROFILE_ID:-phase15-s2-p4-state-recovery-v1}" \
       --p4-addr "$P4_ADDR" \
       --p4-host 127.0.0.1 \
       --p4-port "$P4_PORT" \
@@ -1310,7 +1311,7 @@ run_s2_p4_state_recovery() {
       --minimum-stable-delivery "${S2_RECOVERY_MINIMUM_STABLE_DELIVERY:-0.99}" \
       --minimum-control-delivery "${S2_RECOVERY_MINIMUM_CONTROL_DELIVERY:-0.99}" \
       --maximum-fault-delivery "${S2_RECOVERY_MAXIMUM_FAULT_DELIVERY:-0.05}" \
-      --maximum-first-packet-recovery-ms "${S2_RECOVERY_MAXIMUM_FIRST_PACKET_MS:-250}" \
+      --maximum-first-packet-recovery-ms "${S2_RECOVERY_MAXIMUM_FIRST_PACKET_MS:-50}" \
       --state-readback-timeout-s "${S2_RECOVERY_STATE_READBACK_TIMEOUT_S:-2}" \
       --state-poll-interval-s "${S2_RECOVERY_STATE_POLL_INTERVAL_S:-0.02}" \
       --worker-max-runtime-s "${S2_RECOVERY_WORKER_MAX_RUNTIME_S:-120}"

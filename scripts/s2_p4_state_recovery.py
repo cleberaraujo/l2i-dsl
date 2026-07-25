@@ -1295,7 +1295,8 @@ def orchestrate(args: argparse.Namespace) -> int:
         operational_ok = all(operational_checks.values())
 
         summary = {
-            "scenario": "S2_P4_multicast_state_recovery_foundation",
+            "scenario": "S2_P4_multicast_state_recovery",
+            "recovery_profile_id": args.recovery_profile_id,
             "fault_model": "p4runtime_multicast_table_and_pre_state_deletion",
             "scope": {
                 "multicast_state_loss_injected": True,
@@ -1363,6 +1364,7 @@ def orchestrate(args: argparse.Namespace) -> int:
         summary_path = output_dir / "summary.json"
         dump_json(summary_path, summary)
 
+        print(f"PHASE15_RECOVERY_PROFILE_ID={args.recovery_profile_id}")
         print("PHASE15_RECOVERY_FAULT_MODEL=p4runtime_multicast_state_deletion")
         print(f"PHASE15_RECOVERY_STATE_ABSENCE_CONFIRMED={absence_ok}")
         print(f"PHASE15_RECOVERY_STATE_RESTORATION_CONFIRMED={restoration_ok}")
@@ -1428,6 +1430,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Inject and recover S2 multicast P4Runtime state loss."
     )
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--recovery-profile-id",
+        default="phase15-s2-p4-state-recovery-v1",
+        help=(
+            "Versioned recovery profile identifier recorded in summary.json. "
+            "The identifier documents the validated fault model and bounds; "
+            "it does not imply autonomous MAD detection or remediation."
+        ),
+    )
     parser.add_argument("--p4-addr", default="127.0.0.1:9559")
     parser.add_argument("--p4-host", default="127.0.0.1")
     parser.add_argument("--p4-port", type=int, default=9559)

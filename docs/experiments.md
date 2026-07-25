@@ -376,3 +376,56 @@ O perfil completo, os critérios de validação e o escopo das afirmações est�
 [`profiles/s2_qos_contention_profile.json`](../profiles/s2_qos_contention_profile.json).
 A validação abrange diferenciação de QoS no egresso Linux compartilhado. Ela não
 valida filas internas do P4 nem mecanismos de recuperação.
+
+
+---
+
+# ♻️ 12. Perfil validado de recuperação de estado multicast S2/P4
+
+O experimento de recuperação utiliza o perfil
+`phase15-s2-p4-state-recovery-v1`. O modelo de falha remove seletivamente, por
+P4Runtime, a entrada da tabela multicast e o grupo PRE, confirma a ausência por
+readback e rematerializa o estado desejado após uma retenção de falha
+controlada. Um fluxo unicast independente permanece ativo durante todo o
+ensaio, permitindo distinguir a perda seletiva do estado multicast de uma
+reinicialização do BMv2.
+
+A matriz temporal completa pode ser executada por:
+
+```bash
+./setup_all.sh run_s2_p4_state_recovery_validation
+```
+
+A validação usa oito execuções em ordem espelhada `A → B → C → D → D → C → B
+→ A`, variando o instante de injeção entre `3.0 s` e `5.0 s` e a retenção da
+falha entre `0.5 s` e `3.0 s`. Os padrões do experimento por execução são:
+
+```text
+S2_RECOVERY_PROFILE_ID=phase15-s2-p4-state-recovery-v1
+S2_RECOVERY_MULTICAST_RATE_MBPS=2
+S2_RECOVERY_CONTROL_RATE_MBPS=0.5
+S2_RECOVERY_PACKET_SIZE=1200
+S2_RECOVERY_SPIN_THRESHOLD_US=900
+S2_RECOVERY_MINIMUM_POST_S=5
+S2_RECOVERY_WINDOW_GUARD_S=0.25
+S2_RECOVERY_MINIMUM_STABLE_DELIVERY=0.99
+S2_RECOVERY_MINIMUM_CONTROL_DELIVERY=0.99
+S2_RECOVERY_MAXIMUM_FAULT_DELIVERY=0.05
+S2_RECOVERY_MAXIMUM_FIRST_PACKET_MS=50
+```
+
+Nas oito execuções, B e C mantiveram entrega integral antes da falha, entrega
+nula enquanto o estado multicast esteve ausente e entrega integral após a
+rematerialização. O controle unicast permaneceu em `1.0` em todas as janelas. A
+detecção de ausência apresentou máximo de `8.873 ms`; a rematerialização com
+confirmação por readback, máximo de `10.112 ms`; e o intervalo entre o início da
+remediação e o primeiro pacote novamente recebido, máximos de `15.298 ms` em B
+e `15.237 ms` em C.
+
+O intervalo deliberado de retenção da falha não é contabilizado como latência de
+recuperação. A validação cobre detecção e recuperação acionadas pelo próprio
+harness, preservando explicitamente fora do escopo a detecção autônoma pelo MAD,
+a recuperação autônoma, a reinicialização do BMv2 e a recarga do pipeline.
+
+O perfil completo, os limiares e a delimitação das afirmações estão em
+[`profiles/s2_state_recovery_profile.json`](../profiles/s2_state_recovery_profile.json).
