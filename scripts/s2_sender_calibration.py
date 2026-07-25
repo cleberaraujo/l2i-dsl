@@ -17,6 +17,12 @@ Two pacing implementations are compared:
     algorithm still forbids catch-up bursts: the next deadline is anchored to
     the actual previous send time, not to the original absolute schedule.
 
+``repeated_sleep_spin``
+    Retains the short repeated sleeps that were stable under CPU affinity, but
+    replaces the final sleep with a bounded busy-wait. This isolates whether
+    the remaining rate error comes from the last scheduler wake-up rather than
+    from packet transmission or long scheduling stalls.
+
 The ``probe`` command produces one JSON evidence file. The ``analyze`` command
 aggregates a manifest of independent repetitions, applies explicit calibration
 criteria, and identifies the best candidate without changing repository code.
@@ -142,6 +148,51 @@ def wait_hybrid(deadline_ns: int, spin_threshold_ns: int) -> None:
         return
 
 
+def wait_repeated_sleep_spin(deadline_ns: int, spin_threshold_ns: int) -> None:
+    """Use short repeated sleeps and a bounded final busy-wait.
+
+    The Phase 13 foundation showed that repeated sleeps were substantially more
+    stable than one long sleep in this VM, especially when the process was CPU
+    affined. The remaining under-rate error is consistent with overshoot on the
+    final sleep. This candidate therefore keeps the two-millisecond sleep cap
+    and reserves only the configured tail of each interval for active waiting.
+
+    The function does not alter the no-catch-up rule. The caller still anchors
+    the next deadline to the actual preceding send time, so a VM pause cannot
+    be converted into a compensating packet burst.
+    """
+
+    if spin_threshold_ns < 0:
+        raise ValueError("spin threshold must not be negative")
+
+    while True:
+        now_ns = time.monotonic_ns()
+        remaining_ns = deadline_ns - now_ns
+
+        if remaining_ns <= 0:
+            return
+
+        if remaining_ns > spin_threshold_ns:
+            # Sleep only until the start of the spin window. The two-millisecond
+            # cap preserves the behavior that was stable in the foundation run
+            # while avoiding a final sleep that is expected to overshoot.
+            sleep_ns = min(
+                remaining_ns - spin_threshold_ns,
+                2_000_000,
+            )
+
+            if sleep_ns > 0:
+                time.sleep(sleep_ns / 1_000_000_000.0)
+                continue
+
+        # The final interval is deliberately bounded by spin_threshold_ns. A
+        # threshold sweep measures the accuracy/CPU trade-off rather than
+        # embedding an arbitrary production value.
+        while time.monotonic_ns() < deadline_ns:
+            pass
+        return
+
+
 def make_loopback_sockets(packet_size: int) -> tuple[socket.socket, socket.socket, tuple[str, int], bytes]:
     """Create a loopback UDP source and a large-buffer sink for one probe."""
 
@@ -199,6 +250,7 @@ def run_probe(args: argparse.Namespace) -> int:
     wait_function: Callable[[int, int], None] = {
         "current_repeated_sleep": wait_current,
         "hybrid_sleep_spin": wait_hybrid,
+        "repeated_sleep_spin": wait_repeated_sleep_spin,
     }[args.mode]
 
     source, sink, destination, payload = make_loopback_sockets(packet_size)
@@ -526,23 +578,48 @@ def run_analysis(args: argparse.Namespace) -> int:
         print(f"PHASE13_CAL_{token}_CPU_OK={cpu_ok}")
         print(f"PHASE13_CAL_{token}_PASSED={passed}")
 
-    preference = [
-        "hybrid-rt-affinity",
-        "hybrid-affinity",
-        "hybrid-normal",
-        "current-rt-affinity",
-        "current-affinity",
-        "current-normal",
+    passing_candidates = [
+        summary
+        for summary in configuration_summaries.values()
+        if summary["gates"]["passed"]
     ]
 
-    selected_candidate = next(
-        (
-            configuration
-            for configuration in preference
-            if configuration in configuration_summaries
-            and configuration_summaries[configuration]["gates"]["passed"]
-        ),
-        None,
+    # Prefer CPU affinity without real-time scheduling when two candidates pass.
+    # It is easier to reproduce, avoids CAP_SYS_NICE requirements, and reduces
+    # the risk of starving unrelated VM processes. Accuracy, CPU cost, and
+    # stability break ties within the same scheduling class.
+    scheduling_preference = {
+        "affinity": 0,
+        "realtime-affinity": 1,
+        "normal": 2,
+    }
+
+    def candidate_rank(summary: dict[str, Any]) -> tuple[int | float | str, ...]:
+        """Return a deterministic operational ranking for passing candidates."""
+
+        return (
+            float(
+                scheduling_preference.get(
+                    str(summary["scheduling_mode"]),
+                    99,
+                )
+            ),
+            float(summary["median_cpu_ratio"]),
+            float(summary["maximum_absolute_rate_error_pct"]),
+            float(summary["rate_coefficient_of_variation"]),
+            str(summary["configuration"]),
+        )
+
+    selected_summary = (
+        min(passing_candidates, key=candidate_rank)
+        if passing_candidates
+        else None
+    )
+
+    selected_candidate = (
+        str(selected_summary["configuration"])
+        if selected_summary is not None
+        else None
     )
 
     result = {
@@ -556,6 +633,7 @@ def run_analysis(args: argparse.Namespace) -> int:
         },
         "invalid_rows": invalid_rows,
         "configurations": configuration_summaries,
+        "passing_candidate_count": len(passing_candidates),
         "selected_candidate": selected_candidate,
         "candidate_found": selected_candidate is not None,
     }
@@ -563,6 +641,10 @@ def run_analysis(args: argparse.Namespace) -> int:
     write_json(Path(args.output), result)
 
     print(f"PHASE13_CALIBRATION_INVALID_ROW_COUNT={len(invalid_rows)}")
+    print(
+        "PHASE13_CALIBRATION_PASSING_CANDIDATE_COUNT="
+        f"{len(passing_candidates)}"
+    )
     print(f"PHASE13_CALIBRATION_CANDIDATE={selected_candidate or 'NONE'}")
     print(f"PHASE13_CALIBRATION_CANDIDATE_FOUND={selected_candidate is not None}")
     print("PHASE13_CALIBRATION_ANALYSIS_OK")
@@ -580,6 +662,7 @@ def add_probe_arguments(parser: argparse.ArgumentParser) -> None:
         choices=(
             "current_repeated_sleep",
             "hybrid_sleep_spin",
+            "repeated_sleep_spin",
         ),
         required=True,
     )
