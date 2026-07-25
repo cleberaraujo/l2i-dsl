@@ -104,6 +104,27 @@ def wait_for_barrier(path: Path, timeout_s: float) -> bool:
     return path.is_file()
 
 
+def wait_for_recovery_or_failure(
+    controller: MADAssuranceController,
+    timeout_s: float,
+) -> str:
+    """Wait from confirmed fault completion for recovery or controller failure."""
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if controller.first_recovery_event.is_set():
+            return "recovered"
+        if controller.failed_event.is_set():
+            return "controller_failed"
+        time.sleep(0.02)
+
+    if controller.first_recovery_event.is_set():
+        return "recovered"
+    if controller.failed_event.is_set():
+        return "controller_failed"
+    return "timeout"
+
+
 def run_command(
     argv: list[str],
     *,
@@ -1252,14 +1273,25 @@ def orchestrate(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
-        if not controller.first_recovery_event.wait(
-            args.assurance_recovery_timeout_s
-        ):
-            fail("autonomous cross-domain convergence was not confirmed")
-
-        injector_stdout, injector_stderr = injector_process.communicate(
-            timeout=args.injector_completion_timeout_s
+        # The recovery timeout must start after the independent injector has
+        # completed and its evidence confirms that all three fault writes were
+        # effective. Starting this timeout at barrier publication would consume
+        # the configured fault delay and systematically shorten the available
+        # post-fault convergence window for slower heterogeneous readbacks.
+        injector_wait_timeout_s = (
+            args.fault_after_s
+            + args.injector_completion_timeout_s
         )
+        try:
+            injector_stdout, injector_stderr = injector_process.communicate(
+                timeout=injector_wait_timeout_s
+            )
+        except subprocess.TimeoutExpired as exc:
+            fail(
+                "independent fault injector did not complete within "
+                f"{injector_wait_timeout_s:.3f}s: {exc}"
+            )
+
         if injector_process.returncode != 0:
             fail(
                 "independent fault injector failed: "
@@ -1267,9 +1299,73 @@ def orchestrate(args: argparse.Namespace) -> int:
             )
         if not injector_output.is_file():
             fail("independent fault injector evidence is missing")
+
         injector = json.loads(
             injector_output.read_text(encoding="utf-8")
         )
+        if (
+            injector.get("all_domain_writes_accepted") is not True
+            or injector.get("all_domain_absence_confirmed") is not True
+        ):
+            fail(
+                "independent fault injector did not confirm complete "
+                "cross-domain state deletion"
+            )
+
+        print(
+            "PHASE17_FAULT_INJECTOR_VERIFIED_BEFORE_RECOVERY_WAIT=True"
+        )
+        print(
+            "PHASE17_RECOVERY_WAIT_REFERENCE="
+            "fault_injector_completion"
+        )
+
+        recovery_wait_started_ns = time.monotonic_ns()
+        recovery_wait_outcome = wait_for_recovery_or_failure(
+            controller,
+            args.assurance_recovery_timeout_s,
+        )
+        recovery_wait_completed_ns = time.monotonic_ns()
+
+        if recovery_wait_outcome != "recovered":
+            controller_snapshot = controller.snapshot()
+            aggregate_snapshot = aggregate.snapshot()
+            final_observation = aggregate.observe()
+            diagnostic = {
+                "outcome": recovery_wait_outcome,
+                "timeout_s": args.assurance_recovery_timeout_s,
+                "wait_reference": "fault_injector_completion",
+                "wait_started_monotonic_ns": recovery_wait_started_ns,
+                "wait_completed_monotonic_ns": recovery_wait_completed_ns,
+                "wait_elapsed_ms": (
+                    recovery_wait_completed_ns - recovery_wait_started_ns
+                ) / 1_000_000.0,
+                "injector": {
+                    **injector,
+                    "returncode": injector_process.returncode,
+                    "stdout": injector_stdout,
+                    "stderr": injector_stderr,
+                },
+                "controller": controller_snapshot,
+                "multidomain_adapter": aggregate_snapshot,
+                "final_observation": final_observation.to_dict(),
+            }
+            dump_json(
+                output_dir / "recovery-wait-diagnostic.json",
+                diagnostic,
+            )
+
+            if recovery_wait_outcome == "controller_failed":
+                fail(
+                    "assurance controller failed before cross-domain "
+                    "convergence: "
+                    f"{controller_snapshot.get('failure')}"
+                )
+
+            fail(
+                "autonomous cross-domain convergence was not confirmed "
+                "within the post-fault recovery timeout"
+            )
 
         # Preserve a short stable period after convergence so the controller
         # performs additional aggregate observations before it is stopped.
@@ -1760,7 +1856,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
     )
-    orchestrator.add_argument("--assurance-recovery-timeout-s", type=float, default=8.0)
+    orchestrator.add_argument("--assurance-recovery-timeout-s", type=float, default=12.0)
     orchestrator.add_argument("--assurance-stop-timeout-s", type=float, default=3.0)
     orchestrator.add_argument("--assurance-maximum-runtime-s", type=float, default=30.0)
     orchestrator.add_argument("--initial-cleanup-election-low", type=int, default=17180)

@@ -1468,6 +1468,8 @@ run_s2_multidomain_autonomous_assurance() {
       --minimum-mbps "${S2_MULTIDOMAIN_ASSURANCE_MINIMUM_MBPS:-2}" \
       --maximum-mbps "${S2_MULTIDOMAIN_ASSURANCE_MAXIMUM_MBPS:-3}" \
       --fault-after-s "${S2_MULTIDOMAIN_ASSURANCE_FAULT_AFTER_S:-4}" \
+      --injector-completion-timeout-s "${S2_MULTIDOMAIN_ASSURANCE_INJECTOR_COMPLETION_TIMEOUT_S:-10}" \
+      --assurance-recovery-timeout-s "${S2_MULTIDOMAIN_ASSURANCE_RECOVERY_TIMEOUT_S:-12}" \
       --maximum-detection-ms "${S2_MULTIDOMAIN_ASSURANCE_MAX_DETECTION_MS:-1500}" \
       --maximum-control-plane-recovery-ms "${S2_MULTIDOMAIN_ASSURANCE_MAX_CONTROL_PLANE_RECOVERY_MS:-2500}" \
       --maximum-total-reconciliation-ms "${S2_MULTIDOMAIN_ASSURANCE_MAX_TOTAL_RECONCILIATION_MS:-4000}" \
