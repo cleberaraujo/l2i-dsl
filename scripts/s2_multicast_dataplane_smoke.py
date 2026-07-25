@@ -475,6 +475,7 @@ def orchestrate(args: argparse.Namespace) -> int:
         "--output", str(sender_output),
     ])
 
+    print(f"S2_DP_SENDER_PROFILE_ID={args.sender_profile_id}")
     print(f"S2_DP_SENDER_CPU={sender_cpu if sender_cpu is not None else 'none'}")
 
     if readiness_ok:
@@ -617,6 +618,7 @@ def orchestrate(args: argparse.Namespace) -> int:
         "source": {
             "namespace": args.source_namespace,
             "ip": args.source_ip,
+            "sender_profile_id": args.sender_profile_id,
             "sender_cpu": sender_cpu,
         },
         "rate_validation": {
@@ -649,6 +651,7 @@ def orchestrate(args: argparse.Namespace) -> int:
     dump_json(summary_path, summary)
 
     print(f"S2_DP_SUMMARY={summary_path}")
+    print(f"S2_DP_SENDER_PROFILE_ID={args.sender_profile_id}")
     print("S2_DP_RECEIVER_LIFECYCLE_MODE=explicit_readiness_sender_completion_drain_stop")
     print(f"S2_DP_RECEIVER_STOP_SIGNALLED=True")
     print(f"S2_DP_DATAPLANE_EXERCISED=True")
@@ -709,6 +712,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="minimum_interval_no_catchup",
     )
     orch.add_argument("--spin-threshold-us", type=float, default=0.0)
+    orch.add_argument(
+        "--sender-profile-id",
+        default="custom",
+        help=(
+            "Evidence label for the sender pacing profile. The value is "
+            "recorded in summary.json and does not implicitly change any "
+            "runtime parameter."
+        ),
+    )
     orch.add_argument("--sender-cpu", default="none")
     orch.add_argument("--max-abs-rate-error-pct", type=float, default=5.0)
     orch.add_argument("--min-inter-send-ratio", type=float, default=0.98)

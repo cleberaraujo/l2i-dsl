@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile_id": "phase13-tailspin-900us-affinity-v1",
+  "scenario": "S2_P4_multicast_dataplane_smoke",
+  "selection_status": "production_confirmed",
+  "runtime": {
+    "pacing_mode": "repeated_sleep_spin",
+    "spin_threshold_us": 900.0,
+    "sender_cpu": "auto",
+    "no_catch_up": true
+  },
+  "validation_gates": {
+    "maximum_absolute_rate_error_pct": 5.0,
+    "minimum_inter_send_ratio": 0.98,
+    "maximum_cpu_ratio": 0.35,
+    "minimum_receiver_delivery_ratio": 0.99
+  },
+  "production_confirmation": {
+    "requested_payload_mbps": 2.0,
+    "packet_size_bytes": 1200,
+    "nominal_duration_s": 3.0,
+    "repetitions": 3,
+    "median_payload_mbps": 1.999113891,
+    "maximum_absolute_rate_error_pct": 0.163151,
+    "rate_coefficient_of_variation": 0.000771713,
+    "minimum_inter_send_ratio": 1.000295417,
+    "median_cpu_ratio": 0.168492834,
+    "minimum_receiver_b_delivery_ratio": 1.0,
+    "minimum_receiver_c_delivery_ratio": 1.0
+  },
+  "selection_policy": "minimum_maximum_absolute_rate_error_then_cpu_then_cv_then_threshold",
+  "scope": {
+    "requested_sender_rate_validated": true,
+    "multicast_replication_validated": true,
+    "qos_contention_validated": false,
+    "recovery_validated": false
+  },
+  "notes": [
+    "The profile was selected on the complete h1-to-BMv2-to-h3/h4 multicast path.",
+    "CPU affinity is required, but real-time scheduling is not required.",
+    "The active-wait tail is bounded and the sender never catches up after scheduler stalls."
+  ]
+}

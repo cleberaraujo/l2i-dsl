@@ -281,3 +281,45 @@ Este conjunto de experimentos permite:
 ---
 
 👉 Evidências formais: [docs/claims.md](claims.md)
+
+---
+
+# 🎯 10. Perfil calibrado do emissor S2/P4
+
+O smoke test multicast no dataplane P4 utiliza, por padrão, o perfil calibrado
+`phase13-tailspin-900us-affinity-v1`. A seleção foi realizada no caminho
+completo `h1 → BMv2 → h3/h4`, e não apenas em loopback.
+
+O perfil combina espera passiva repetida com uma espera ativa final limitada a
+`900 µs`, fixa somente o emissor em uma CPU permitida e preserva a regra de não
+compensar atrasos do escalonador com rajadas de pacotes.
+
+```bash id="exp_s2_p4_calibrated_smoke"
+./setup_all.sh run_s2_p4_dataplane_smoke
+```
+
+Os padrões aplicados são:
+
+```text id="exp_s2_p4_profile_defaults"
+S2_DP_PACING_MODE=repeated_sleep_spin
+S2_DP_SPIN_THRESHOLD_US=900
+S2_DP_SENDER_CPU=auto
+S2_DP_REQUIRE_RATE_VALIDATION=1
+S2_DP_MAX_ABS_RATE_ERROR_PCT=5
+S2_DP_MIN_INTER_SEND_RATIO=0.98
+```
+
+O perfil completo e a proveniência da calibração estão registrados em
+[`profiles/s2_sender_profile.json`](../profiles/s2_sender_profile.json).
+
+Uma execução de diagnóstico exclusivamente voltada à replicação pode desativar
+o gate de taxa de forma explícita:
+
+```bash id="exp_s2_p4_replication_only"
+S2_DP_REQUIRE_RATE_VALIDATION=0 \
+./setup_all.sh run_s2_p4_dataplane_smoke
+```
+
+Essa opção não deve ser usada para sustentar afirmações sobre precisão da carga
+oferecida. O perfil calibra a taxa do emissor e a replicação multicast; ele não
+constitui, isoladamente, validação de QoS sob contenção nem de recuperação.

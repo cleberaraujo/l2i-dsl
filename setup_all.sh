@@ -1110,11 +1110,13 @@ run_s2_p4_dataplane_smoke() {
   local group_id="${S2_DP_MCAST_GROUP_ID:-1}"
   local udp_port="${S2_DP_UDP_PORT:-5001}"
   local rate_validation_args=()
+  local sender_profile_id="${S2_DP_SENDER_PROFILE_ID:-phase13-tailspin-900us-affinity-v1}"
 
-  # Rate validation is opt-in so that historical smoke invocations retain their
-  # original replication-only semantics. Calibration and confirmation runners
-  # enable the gate explicitly after supplying a validated pacing profile.
-  if [[ "${S2_DP_REQUIRE_RATE_VALIDATION:-0}" == "1" ]]; then
+  # Phase 13 selected the portable 900 us tail-spin profile on the complete
+  # namespace/veth/BMv2 multicast path. Rate validation is therefore enabled by
+  # default for this smoke command. Set S2_DP_REQUIRE_RATE_VALIDATION=0 only for
+  # an explicitly replication-only diagnostic run.
+  if [[ "${S2_DP_REQUIRE_RATE_VALIDATION:-1}" == "1" ]]; then
     rate_validation_args+=(--require-rate-validation)
   fi
 
@@ -1150,9 +1152,10 @@ run_s2_p4_dataplane_smoke() {
       --duration "${S2_DP_DURATION:-3}" \
       --rate-mbps "${S2_DP_RATE_MBPS:-2}" \
       --packet-size "${S2_DP_PACKET_SIZE:-1200}" \
-      --pacing-mode "${S2_DP_PACING_MODE:-minimum_interval_no_catchup}" \
-      --spin-threshold-us "${S2_DP_SPIN_THRESHOLD_US:-0}" \
-      --sender-cpu "${S2_DP_SENDER_CPU:-none}" \
+      --pacing-mode "${S2_DP_PACING_MODE:-repeated_sleep_spin}" \
+      --spin-threshold-us "${S2_DP_SPIN_THRESHOLD_US:-900}" \
+      --sender-profile-id "$sender_profile_id" \
+      --sender-cpu "${S2_DP_SENDER_CPU:-auto}" \
       --max-abs-rate-error-pct "${S2_DP_MAX_ABS_RATE_ERROR_PCT:-5}" \
       --min-inter-send-ratio "${S2_DP_MIN_INTER_SEND_RATIO:-0.98}" \
       "${rate_validation_args[@]}" \
