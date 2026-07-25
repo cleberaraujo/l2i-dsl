@@ -1325,6 +1325,95 @@ run_s2_p4_state_recovery() {
 }
 
 
+run_s2_p4_autonomous_assurance() {
+  require_repo_layout
+
+  local output_dir="${S2_ASSURANCE_OUTPUT_DIR:-$REPO_DIR/results/S2/autonomous-assurance-$(date -u +%Y%m%dT%H%M%SZ)}"
+  local group="${S2_ASSURANCE_MCAST_DST:-239.1.1.1}"
+  local group_id="${S2_ASSURANCE_MCAST_GROUP_ID:-1}"
+  local multicast_port="${S2_ASSURANCE_MULTICAST_PORT:-5001}"
+  local control_port="${S2_ASSURANCE_CONTROL_PORT:-6001}"
+
+  # The independent injector receives only a traffic-start barrier and its own
+  # private delay. The MAD assurance controller continuously observes P4Runtime
+  # state and never receives the fault schedule or a remediation command.
+  cleanup_topologies_only
+  trap 'cleanup_topologies_only' EXIT INT TERM
+
+  run sudo "$REPO_DIR/scripts/s2_p4_topology_setup.sh"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    trap - EXIT INT TERM
+    cleanup_topologies_only
+    return 0
+  fi
+
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/s2_p4_autonomous_assurance.py" \
+      orchestrate \
+      --output-dir "$output_dir" \
+      --assurance-profile-id "${S2_ASSURANCE_PROFILE_ID:-phase16-s2-p4-autonomous-assurance-foundation-v1}" \
+      --p4-addr "$P4_ADDR" \
+      --p4-host 127.0.0.1 \
+      --p4-port "$P4_PORT" \
+      --device-id 0 \
+      --p4-outdir /tmp/l2i_minimal \
+      --group "$group" \
+      --group-id "$group_id" \
+      --multicast-ports 1 2 \
+      --multicast-port "$multicast_port" \
+      --control-port "$control_port" \
+      --duration "${S2_ASSURANCE_DURATION:-12}" \
+      --fault-after-s "${S2_ASSURANCE_FAULT_AFTER_S:-4}" \
+      --minimum-post-s "${S2_ASSURANCE_MINIMUM_POST_S:-5}" \
+      --window-guard-s "${S2_ASSURANCE_WINDOW_GUARD_S:-0.25}" \
+      --multicast-rate-mbps "${S2_ASSURANCE_MULTICAST_RATE_MBPS:-2}" \
+      --control-rate-mbps "${S2_ASSURANCE_CONTROL_RATE_MBPS:-0.5}" \
+      --packet-size "${S2_ASSURANCE_PACKET_SIZE:-1200}" \
+      --spin-threshold-us "${S2_ASSURANCE_SPIN_THRESHOLD_US:-900}" \
+      --multicast-sender-cpu "${S2_ASSURANCE_MULTICAST_SENDER_CPU:-auto}" \
+      --control-sender-cpu "${S2_ASSURANCE_CONTROL_SENDER_CPU:-auto-distinct}" \
+      --max-abs-rate-error-pct "${S2_ASSURANCE_MAX_ABS_RATE_ERROR_PCT:-5}" \
+      --min-inter-send-ratio "${S2_ASSURANCE_MIN_INTER_SEND_RATIO:-0.98}" \
+      --minimum-stable-delivery "${S2_ASSURANCE_MINIMUM_STABLE_DELIVERY:-0.99}" \
+      --minimum-control-delivery "${S2_ASSURANCE_MINIMUM_CONTROL_DELIVERY:-0.99}" \
+      --minimum-lost-packets "${S2_ASSURANCE_MINIMUM_LOST_PACKETS:-1}" \
+      --maximum-first-packet-recovery-ms "${S2_ASSURANCE_MAX_FIRST_PACKET_MS:-50}" \
+      --maximum-detection-ms "${S2_ASSURANCE_MAX_DETECTION_MS:-150}" \
+      --maximum-control-plane-recovery-ms "${S2_ASSURANCE_MAX_CONTROL_PLANE_RECOVERY_MS:-150}" \
+      --maximum-total-reconciliation-ms "${S2_ASSURANCE_MAX_TOTAL_RECONCILIATION_MS:-250}" \
+      --assurance-poll-interval-s "${S2_ASSURANCE_POLL_INTERVAL_S:-0.02}" \
+      --assurance-drift-confirmations "${S2_ASSURANCE_DRIFT_CONFIRMATIONS:-3}" \
+      --assurance-convergence-confirmations "${S2_ASSURANCE_CONVERGENCE_CONFIRMATIONS:-2}" \
+      --assurance-maximum-remediation-attempts "${S2_ASSURANCE_MAX_REMEDIATION_ATTEMPTS:-3}" \
+      --assurance-initial-backoff-s "${S2_ASSURANCE_INITIAL_BACKOFF_S:-0.01}" \
+      --assurance-backoff-multiplier "${S2_ASSURANCE_BACKOFF_MULTIPLIER:-2}" \
+      --assurance-maximum-backoff-s "${S2_ASSURANCE_MAX_BACKOFF_S:-0.10}" \
+      --state-readback-timeout-s "${S2_ASSURANCE_STATE_READBACK_TIMEOUT_S:-2}" \
+      --state-poll-interval-s "${S2_ASSURANCE_STATE_POLL_INTERVAL_S:-0.01}" \
+      --worker-max-runtime-s "${S2_ASSURANCE_WORKER_MAX_RUNTIME_S:-120}"
+
+  local rc=$?
+  echo "S2_ASSURANCE_OUTPUT_DIR=$output_dir"
+
+  trap - EXIT INT TERM
+  cleanup_topologies_only
+  return "$rc"
+}
+
+
+run_s2_p4_autonomous_assurance_foundation() {
+  require_repo_layout
+
+  # Repeat the autonomous reconciliation experiment and aggregate every drift,
+  # remediation, convergence, dataplane, and continuity record without treating
+  # a scientific candidate decision as an operational shell failure.
+  run \
+    "$REPO_DIR/scripts/run_s2_p4_autonomous_assurance_foundation.sh" \
+    "${PHASE16_FOUNDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/autonomous-assurance-foundation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
+
 run_s2_p4_state_recovery_foundation() {
   require_repo_layout
 
@@ -1463,6 +1552,8 @@ Ações internas úteis:
   run_s2_p4_state_recovery
   run_s2_p4_state_recovery_foundation
   run_s2_p4_state_recovery_validation
+  run_s2_p4_autonomous_assurance
+  run_s2_p4_autonomous_assurance_foundation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1520,6 +1611,8 @@ case "${1:-}" in
   run_s2_p4_state_recovery) run_s2_p4_state_recovery ;;
   run_s2_p4_state_recovery_foundation) run_s2_p4_state_recovery_foundation ;;
   run_s2_p4_state_recovery_validation) run_s2_p4_state_recovery_validation ;;
+  run_s2_p4_autonomous_assurance) run_s2_p4_autonomous_assurance ;;
+  run_s2_p4_autonomous_assurance_foundation) run_s2_p4_autonomous_assurance_foundation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
