@@ -1170,6 +1170,90 @@ run_s2_p4_dataplane_smoke() {
   return "$rc"
 }
 
+
+run_s2_p4_qos_contention() {
+  require_repo_layout
+
+  local output_dir="${S2_QOS_OUTPUT_DIR:-$REPO_DIR/results/S2/qos-contention-$(date -u +%Y%m%dT%H%M%SZ)}"
+  local mode="${S2_QOS_MODE:-baseline}"
+  local group="${S2_QOS_MCAST_DST:-239.1.1.1}"
+  local group_id="${S2_QOS_MCAST_GROUP_ID:-1}"
+  local multicast_port="${S2_QOS_MULTICAST_PORT:-5001}"
+  local background_port="${S2_QOS_BACKGROUND_PORT:-6001}"
+
+  # The current P4 pipeline performs forwarding and replication only. The
+  # shared bottleneck and QoS classes are created on the Linux receiver-B
+  # attachment egress, so the experiment never attributes queue guarantees to
+  # BMv2 or to the P4 program.
+  cleanup_topologies_only
+  trap 'cleanup_topologies_only' EXIT INT TERM
+
+  run sudo "$REPO_DIR/scripts/s2_p4_topology_setup.sh"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    trap - EXIT INT TERM
+    cleanup_topologies_only
+    return 0
+  fi
+
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/p4_program_s2.py" \
+      --addr "$P4_ADDR" \
+      --device-id 0 \
+      --outdir /tmp/l2i_minimal \
+      --mgrp "$group_id" \
+      --dst-mcast "$group" \
+      --ports 1 2
+
+  # Background traffic enters BMv2 at port 3 and exits through port 1. This
+  # makes it share the same receiver-B egress as one multicast replica, while
+  # receiver C on port 2 remains an uncontended control path.
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/p4_program_unicast.py" \
+      --addr "$P4_ADDR" \
+      --device-id 0 \
+      --outdir /tmp/l2i_minimal \
+      --ingress-port 3 \
+      --egress-port 1
+
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/s2_p4_qos_contention.py" \
+      orchestrate \
+      --mode "$mode" \
+      --output-dir "$output_dir" \
+      --bottleneck-device "${S2_QOS_BOTTLENECK_DEVICE:-s2b-h3}" \
+      --capacity-mbps "${S2_QOS_CAPACITY_MBPS:-3}" \
+      --multicast-reserved-mbps "${S2_QOS_MULTICAST_RESERVED_MBPS:-2}" \
+      --queue-limit-packets "${S2_QOS_QUEUE_LIMIT_PACKETS:-64}" \
+      --group "$group" \
+      --multicast-port "$multicast_port" \
+      --background-port "$background_port" \
+      --duration "${S2_QOS_DURATION:-3}" \
+      --background-duration "${S2_QOS_BACKGROUND_DURATION:-7}" \
+      --background-prefill-s "${S2_QOS_BACKGROUND_PREFILL_S:-0.5}" \
+      --background-drain-s "${S2_QOS_BACKGROUND_DRAIN_S:-0.5}" \
+      --multicast-receiver-drain-s "${S2_QOS_MULTICAST_RECEIVER_DRAIN_S:-1}" \
+      --multicast-rate-mbps "${S2_QOS_MULTICAST_RATE_MBPS:-2}" \
+      --background-rate-mbps "${S2_QOS_BACKGROUND_RATE_MBPS:-2}" \
+      --packet-size "${S2_QOS_PACKET_SIZE:-1200}" \
+      --spin-threshold-us "${S2_QOS_SPIN_THRESHOLD_US:-900}" \
+      --sender-profile-id "${S2_QOS_SENDER_PROFILE_ID:-phase13-tailspin-900us-affinity-v1}" \
+      --multicast-sender-cpu "${S2_QOS_MULTICAST_SENDER_CPU:-auto}" \
+      --background-sender-cpu "${S2_QOS_BACKGROUND_SENDER_CPU:-auto-distinct}" \
+      --max-abs-rate-error-pct "${S2_QOS_MAX_ABS_RATE_ERROR_PCT:-5}" \
+      --min-inter-send-ratio "${S2_QOS_MIN_INTER_SEND_RATIO:-0.98}" \
+      --worker-ready-timeout-s "${S2_QOS_WORKER_READY_TIMEOUT_S:-10}" \
+      --worker-stop-timeout-s "${S2_QOS_WORKER_STOP_TIMEOUT_S:-5}" \
+      --worker-max-runtime-s "${S2_QOS_WORKER_MAX_RUNTIME_S:-120}"
+
+  local rc=$?
+  echo "S2_QOS_OUTPUT_DIR=$output_dir"
+
+  trap - EXIT INT TERM
+  cleanup_topologies_only
+  return "$rc"
+}
+
 # -------------------------------
 # verificações rápidas
 # -------------------------------
@@ -1267,6 +1351,7 @@ Ações internas úteis:
   build_p4c
   push_p4_pipeline
   run_s2_p4_dataplane_smoke
+  run_s2_p4_qos_contention
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1319,6 +1404,7 @@ case "${1:-}" in
   run_s1_mock) run_s1_mock ;;
   run_s2_real) run_s2_real ;;
   run_s2_p4_dataplane_smoke) run_s2_p4_dataplane_smoke ;;
+  run_s2_p4_qos_contention) run_s2_p4_qos_contention ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
