@@ -7,8 +7,11 @@ import argparse
 import json
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 from l2i.backends import _shim_linux_tc_local as linux_tc
+from l2i.backends import _shim_mock_netconf as mock_netconf
+from l2i.backends import _shim_mock_p4 as mock_p4
 from scenarios import multidomain_s1 as s1
 
 
@@ -52,6 +55,7 @@ def main() -> None:
 
     scenario_path = ROOT / "scenarios" / "multidomain_s1.py"
     topology_path = ROOT / "scripts" / "s1_topology_setup.sh"
+    topology_cleanup_path = ROOT / "scripts" / "s1_topology_cleanup.sh"
     dispatcher_path = ROOT / "setup_all.sh"
     netconf_backend_path = (
         ROOT / "l2i" / "backends" / "_shim_real_netconf.py"
@@ -61,6 +65,7 @@ def main() -> None:
 
     source = scenario_path.read_text(encoding="utf-8")
     topology = topology_path.read_text(encoding="utf-8")
+    topology_cleanup = topology_cleanup_path.read_text(encoding="utf-8")
     dispatcher = dispatcher_path.read_text(encoding="utf-8")
     netconf_backend = netconf_backend_path.read_text(encoding="utf-8")
     p4_backend = p4_backend_path.read_text(encoding="utf-8")
@@ -98,6 +103,166 @@ def main() -> None:
         intent.bandwidth_min_mbps == 4.0
         and intent.bandwidth_max_mbps is None
         and "max_mbps" not in intent.to_backend_intent(),
+    )
+    control_intent = intent.to_backend_intent()
+    mock_netconf_applied, mock_netconf_response = mock_netconf.apply_qos(
+        {"name": "B"},
+        control_intent,
+        None,
+    )
+    mock_p4_applied, mock_p4_response = mock_p4.apply_qos(
+        {"name": "C"},
+        control_intent,
+        None,
+    )
+    mock_netconf_gate, _, _ = s1._gate_control_domain(
+        domain="B",
+        backend_mode="mock",
+        result={
+            "applied": mock_netconf_applied,
+            "responses": [{"response": mock_netconf_response}],
+        },
+        intent=intent,
+    )
+    mock_p4_gate, _, _ = s1._gate_control_domain(
+        domain="C",
+        backend_mode="mock",
+        result={
+            "applied": mock_p4_applied,
+            "responses": [{"response": mock_p4_response}],
+        },
+        intent=intent,
+    )
+    corrupted_mock_p4 = json.loads(json.dumps(mock_p4_response))
+    corrupted_mock_p4["request"]["normalized_intent"]["priority"] = (
+        "best_effort"
+    )
+    corrupted_mock_gate, _, _ = s1._gate_control_domain(
+        domain="C",
+        backend_mode="mock",
+        result={
+            "applied": True,
+            "responses": [{"response": corrupted_mock_p4}],
+        },
+        intent=intent,
+    )
+    corrupted_mock_netconf = json.loads(json.dumps(mock_netconf_response))
+    corrupted_mock_netconf["request"]["xml"] = (
+        corrupted_mock_netconf["request"]["xml"].replace(
+            "<min-mbps>4</min-mbps>",
+            "<min-mbps>5</min-mbps>",
+        )
+    )
+    corrupted_netconf_gate, _, _ = s1._gate_control_domain(
+        domain="B",
+        backend_mode="mock",
+        result={
+            "applied": True,
+            "responses": [{"response": corrupted_mock_netconf}],
+        },
+        intent=intent,
+    )
+    corrupted_mock_dscp = json.loads(json.dumps(mock_p4_response))
+    corrupted_mock_dscp["planned"]["materialized_projection"]["new_dscp"] = 0
+    corrupted_dscp_gate, _, _ = s1._gate_control_domain(
+        domain="C",
+        backend_mode="mock",
+        result={
+            "applied": True,
+            "responses": [{"response": corrupted_mock_dscp}],
+        },
+        intent=intent,
+    )
+    netconf_xml = mock_netconf_response.get("request", {}).get("xml", "")
+    require(
+        "MOCK_INTENT_SEMANTICS_FAIL_CLOSED",
+        mock_netconf_gate
+        and mock_p4_gate
+        and not corrupted_mock_gate
+        and not corrupted_netconf_gate
+        and not corrupted_dscp_gate
+        and "<class>prio10</class>" in netconf_xml
+        and "<min-mbps>4</min-mbps>" in netconf_xml
+        and "<max-mbps>" not in netconf_xml
+        and (
+            mock_p4_response.get("planned", {})
+            .get("materialized_projection", {})
+            .get("new_dscp")
+            == 8
+        )
+        and mock_p4_response.get("planned", {}).get("not_materialized")
+        == ["min_mbps"],
+    )
+    retained_s2_intent = {
+        "class": "prio20",
+        "min_mbps": 2,
+        "max_mbps": 6,
+    }
+    retained_s1_timing_intent = {
+        "latency_pctl": "P99",
+        "latency_max_ms": 30,
+        "bandwidth_min_mbps": 4,
+        "bandwidth_max_mbps": 0,
+        "priority_level": "high",
+    }
+    retained_s2_netconf_ok, retained_s2_netconf = mock_netconf.apply_qos(
+        {"name": "B"},
+        retained_s2_intent,
+        None,
+    )
+    retained_s2_p4_ok, retained_s2_p4 = mock_p4.apply_qos(
+        {"name": "C"},
+        retained_s2_intent,
+        None,
+    )
+    retained_timing_netconf_ok, retained_timing_netconf = (
+        mock_netconf.apply_qos(
+            {"name": "B"},
+            retained_s1_timing_intent,
+            None,
+        )
+    )
+    retained_timing_p4_ok, retained_timing_p4 = mock_p4.apply_qos(
+        {"name": "C"},
+        retained_s1_timing_intent,
+        None,
+    )
+    require(
+        "MOCK_ACTUAL_RETAINED_SHAPES_SUPPORTED",
+        retained_s2_netconf_ok
+        and retained_s2_p4_ok
+        and retained_timing_netconf_ok
+        and retained_timing_p4_ok
+        and (
+            retained_s2_netconf.get("request", {})
+            .get("normalized_intent", {})
+            .get("priority")
+            == "medium"
+        )
+        and (
+            retained_s2_p4.get("planned", {})
+            .get("materialized_projection", {})
+            .get("new_dscp")
+            == 16
+        )
+        and (
+            retained_timing_netconf.get("request", {})
+            .get("normalized_intent")
+            == {
+                "class": "prio10",
+                "min_mbps": 4,
+                "priority": "high",
+            }
+        )
+        and (
+            retained_timing_p4.get("request", {})
+            .get("normalized_intent")
+            == {
+                "class": "prio10",
+                "min_mbps": 4,
+                "priority": "high",
+            }
+        ),
     )
     readback_without_maximum = """
 <rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -171,6 +336,29 @@ def main() -> None:
                                 "Ingress.ipv4_qos:"
                                 f"{s1.DESTINATION_IP}"
                             ),
+                            "new_dscp": 8,
+                        },
+                    }
+                }
+            ],
+        },
+        intent=intent,
+    )
+    mismatched_p4_gate_ok, _, _ = s1._gate_control_domain(
+        domain="C",
+        backend_mode="real",
+        result={
+            "applied": True,
+            "responses": [
+                {
+                    "response": {
+                        "readback_dump": "# entries=1",
+                        "readback_verified": True,
+                        "installed_rule": {
+                            "match": (
+                                "Ingress.ipv4_qos:"
+                                f"{s1.DESTINATION_IP}"
+                            ),
                             "new_dscp": 46,
                         },
                     }
@@ -194,7 +382,7 @@ def main() -> None:
                                 "Ingress.ipv4_qos:"
                                 f"{s1.DESTINATION_IP}"
                             ),
-                            "new_dscp": 46,
+                            "new_dscp": 8,
                         },
                     }
                 }
@@ -207,6 +395,7 @@ def main() -> None:
         netconf_gate_ok
         and not stale_netconf_gate_ok
         and p4_gate_ok
+        and not mismatched_p4_gate_ok
         and not unverified_p4_gate_ok,
     )
 
@@ -308,6 +497,37 @@ def main() -> None:
         and any("classid 1:30" in command and "prio 7" in command
                 for command in environment_commands),
     )
+    synthetic_tc_classes = "\n".join(
+        (
+            "class htb 1:1 root rate 50Mbit ceil 50Mbit",
+            "class htb 1:30 parent 1:1 prio 7 rate 46Mbit ceil 50Mbit",
+            "class htb 1:10 parent 1:1 prio 0 rate 4000Kbit ceil 0.05Gbit",
+        )
+    )
+    require(
+        "TC_READBACK_VALUES_EXPLICIT",
+        linux_tc._class_readback_matches(
+            synthetic_tc_classes,
+            classid="1:30",
+            rate_mbps=46,
+            ceil_mbps=50,
+            priority=7,
+        )
+        and linux_tc._class_readback_matches(
+            synthetic_tc_classes,
+            classid="1:10",
+            rate_mbps=4,
+            ceil_mbps=50,
+            priority=0,
+        )
+        and not linux_tc._class_readback_matches(
+            synthetic_tc_classes,
+            classid="1:10",
+            rate_mbps=5,
+            ceil_mbps=50,
+            priority=0,
+        ),
+    )
 
     overlay_ok, overlay = linux_tc.apply_qos(
         {"name": "A"},
@@ -364,6 +584,63 @@ def main() -> None:
         and "best_effort_tcp" in source
         and "rtt_probes" in source,
     )
+    class NeverReadyServer:
+        """Minimal process double for the failed readiness cleanup path."""
+
+        def __init__(self, *, survives_terminate: bool) -> None:
+            self.terminated = False
+            self.killed = False
+            self.survives_terminate = survives_terminate
+            self.communicate_calls = 0
+
+        def poll(self) -> None:
+            return None
+
+        def communicate(self, timeout: float) -> tuple[str, str]:
+            self.communicate_calls += 1
+            if self.killed:
+                return "", "not ready"
+            if not self.terminated or self.survives_terminate:
+                raise s1.subprocess.TimeoutExpired(["iperf3"], timeout)
+            return "", "not ready"
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    startup_results = []
+    for survives_terminate in (False, True):
+        never_ready = NeverReadyServer(
+            survives_terminate=survives_terminate,
+        )
+        startup_failure_raised = False
+        with (
+            patch.object(s1.subprocess, "Popen", return_value=never_ready),
+            patch.object(s1, "_server_ready", return_value=False),
+            patch.object(s1.time, "sleep", return_value=None),
+        ):
+            try:
+                s1._start_iperf_server(s1.SENSITIVE_PORT)
+            except s1.S1ExecutionError:
+                startup_failure_raised = True
+        startup_results.append(
+            (
+                startup_failure_raised
+                and never_ready.terminated
+                and never_ready.communicate_calls >= 2
+                and (
+                    never_ready.killed
+                    if survives_terminate
+                    else not never_ready.killed
+                )
+            )
+        )
+    require(
+        "IPERF_STARTUP_FAILURE_REAPED",
+        all(startup_results),
+    )
     require(
         "BASELINE_ADAPT_DIFFERENTIATED",
         'if args.mode == "adapt":' in source
@@ -394,6 +671,14 @@ def main() -> None:
         and "create_host h2 10.0.0.2 brA" in topology
         and "create_host h3 10.0.0.3 brC" in topology
         and "create_interdomain_link s1-bc-b brB s1-bc-c brC" in topology,
+    )
+    require(
+        "TOPOLOGY_RUNTIME_HYGIENE",
+        "ethtool -K" in topology
+        and "PHASE19_S1_TOPOLOGY_OFFLOADS_DISABLED=True" in topology
+        and "ip netns pids" in topology
+        and "ip netns pids" in topology_cleanup
+        and "graphviz ethtool" in dispatcher,
     )
     require(
         "ATOMIC_FAILURE_SUMMARY",

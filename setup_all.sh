@@ -323,7 +323,7 @@ apt_base() {
     build-essential cmake ninja-build pkg-config \
     autoconf automake libtool libtool-bin \
     python3 python3-dev python3-venv python3-pip \
-    iproute2 iputils-ping net-tools iperf3 fping graphviz \
+    iproute2 iputils-ping net-tools iperf3 fping graphviz ethtool \
     openssh-client openssl \
     protobuf-compiler protobuf-compiler-grpc \
     libprotobuf-dev libprotobuf-c-dev protobuf-c-compiler \

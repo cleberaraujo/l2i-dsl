@@ -30,7 +30,9 @@ em paralelo antes de remover a lógica duplicada dos cenários.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -413,6 +415,63 @@ def _readback(runner: CommandRunner, device: str) -> JsonDict:
     }
 
 
+def _class_readback_matches(
+    classes: str,
+    *,
+    classid: str,
+    rate_mbps: float,
+    ceil_mbps: float,
+    priority: Optional[int] = None,
+) -> bool:
+    """Match the effective HTB class values reported by ``tc``."""
+
+    class_line = next(
+        (
+            line.lower()
+            for line in classes.splitlines()
+            if line.lower().startswith("class htb ")
+            and classid.lower() in line.lower().split()
+        ),
+        "",
+    )
+    if not class_line:
+        return False
+
+    def rate_matches(label: str, expected_mbps: float) -> bool:
+        match = re.search(
+            rf"\b{label}\s+([0-9]+(?:\.[0-9]+)?)([kmgt]?bit)\b",
+            class_line,
+        )
+        if not match:
+            return False
+        value = float(match.group(1))
+        factor_to_mbps = {
+            "bit": 0.000001,
+            "kbit": 0.001,
+            "mbit": 1.0,
+            "gbit": 1000.0,
+            "tbit": 1_000_000.0,
+        }[match.group(2)]
+        observed_mbps = value * factor_to_mbps
+        return math.isclose(
+            observed_mbps,
+            float(expected_mbps),
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        )
+
+    checks = (
+        rate_matches("rate", rate_mbps),
+        rate_matches("ceil", ceil_mbps),
+        (
+            re.search(rf"\bprio\s+{priority}\b", class_line) is not None
+            if priority is not None
+            else True
+        ),
+    )
+    return all(checks)
+
+
 def _preflight_device(runner: CommandRunner, device: str) -> None:
     if runner.target.dry_run:
         return
@@ -659,8 +718,23 @@ def setup_environment(
             classes = str(readback.get("class", ""))
             checks = {
                 "root_htb": f"htb {root_major}:" in qdisc,
-                "parent_class": parent_class in classes,
-                "default_class": (default_class in classes) if create_default else True,
+                "parent_class": _class_readback_matches(
+                    classes,
+                    classid=parent_class,
+                    rate_mbps=capacity,
+                    ceil_mbps=capacity,
+                ),
+                "default_class": (
+                    _class_readback_matches(
+                        classes,
+                        classid=default_class,
+                        rate_mbps=default_rate,
+                        ceil_mbps=default_ceil,
+                        priority=default_priority,
+                    )
+                    if create_default
+                    else True
+                ),
                 "default_netem": (
                     f"netem {default_minor}:" in qdisc
                     if create_default and attach_netem and delay_ms is not None
@@ -1001,9 +1075,19 @@ def apply_qos(
             classes = str(readback.get("class", ""))
             filters = str(readback.get("filter", ""))
             checks = {
-                "priority_class": class_id in classes,
+                "priority_class": _class_readback_matches(
+                    classes,
+                    classid=class_id,
+                    rate_mbps=minimum,
+                    ceil_mbps=maximum,
+                    priority=htb_priority,
+                ),
                 "priority_filter": class_id in filters,
                 "priority_filters": filters.count(class_id) >= len(classifiers),
+                "filter_priorities": all(
+                    f"pref {classifier['filter_priority']} " in filters
+                    for classifier in classifiers
+                ),
                 "priority_netem": (
                     f"netem {class_minor}:" in qdisc
                     if attach_netem and delay_ms is not None

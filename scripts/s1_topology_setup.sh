@@ -26,6 +26,63 @@ readonly S1_ROOT_INTERFACES=(
   s1-bc-c
 )
 
+if ! command -v ethtool >/dev/null 2>&1; then
+  echo "[S1][error] ethtool is required to control veth offloads." >&2
+  exit 1
+fi
+
+disable_emulation_offloads() {
+  local namespace="$1"
+  local device="$2"
+  local feature
+  local state
+  local -a command_prefix=()
+
+  if [[ "$namespace" != "root" ]]; then
+    command_prefix=(ip netns exec "$namespace")
+  fi
+
+  for feature in tso gso gro; do
+    "${command_prefix[@]}" ethtool -K "$device" "$feature" off \
+      >/dev/null 2>&1 || true
+  done
+  state="$("${command_prefix[@]}" ethtool -k "$device")"
+
+  grep -Eq '^tcp-segmentation-offload: off( \[fixed\])?$' <<<"$state"
+  grep -Eq '^generic-segmentation-offload: off( \[fixed\])?$' <<<"$state"
+  grep -Eq '^generic-receive-offload: off( \[fixed\])?$' <<<"$state"
+}
+
+terminate_namespace_processes() {
+  local namespace="$1"
+  local attempt
+  local -a pids=()
+
+  mapfile -t pids < <(ip netns pids "$namespace" 2>/dev/null || true)
+  if [[ "${#pids[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  for attempt in {1..20}; do
+    mapfile -t pids < <(ip netns pids "$namespace" 2>/dev/null || true)
+    if [[ "${#pids[@]}" -eq 0 ]]; then
+      return
+    fi
+    sleep 0.05
+  done
+  kill -KILL "${pids[@]}" 2>/dev/null || true
+  for attempt in {1..20}; do
+    mapfile -t pids < <(ip netns pids "$namespace" 2>/dev/null || true)
+    if [[ "${#pids[@]}" -eq 0 ]]; then
+      return
+    fi
+    sleep 0.05
+  done
+  echo "[S1][error] Processes remain in namespace $namespace: ${pids[*]}" >&2
+  return 1
+}
+
 remove_previous_topology() {
   local namespace
   local bridge
@@ -33,6 +90,7 @@ remove_previous_topology() {
 
   # Namespace deletion also removes the namespace-side veth endpoint.
   for namespace in "${S1_NAMESPACES[@]}"; do
+    terminate_namespace_processes "$namespace"
     ip netns del "$namespace" 2>/dev/null || true
   done
 
@@ -79,6 +137,8 @@ create_host() {
   ip netns exec "$namespace" ip link set "$namespace_interface" up
 
   attach_root_interface "$root_interface" "$bridge"
+  disable_emulation_offloads "$namespace" "$namespace_interface"
+  disable_emulation_offloads root "$root_interface"
 }
 
 create_interdomain_link() {
@@ -90,6 +150,8 @@ create_interdomain_link() {
   ip link add "$left_interface" type veth peer name "$right_interface"
   attach_root_interface "$left_interface" "$left_bridge"
   attach_root_interface "$right_interface" "$right_bridge"
+  disable_emulation_offloads root "$left_interface"
+  disable_emulation_offloads root "$right_interface"
 }
 
 main() {
@@ -116,6 +178,7 @@ main() {
   echo "PHASE19_S1_TOPOLOGY_THREE_SEGMENTS=True"
   echo "PHASE19_S1_TOPOLOGY_INDEPENDENT_SOURCES=True"
   echo "PHASE19_S1_TOPOLOGY_SHARED_BOTTLENECK_INTERFACE=s1-bc-b"
+  echo "PHASE19_S1_TOPOLOGY_OFFLOADS_DISABLED=True"
   ip netns list
 }
 

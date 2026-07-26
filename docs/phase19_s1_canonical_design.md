@@ -18,6 +18,9 @@ changes to NETCONF or P4Runtime.
 The sensitive flow originates at `h1`, the best-effort flow originates at `h2`,
 and both terminate at `h3`. The A, B, and C segments are connected sequentially.
 The `s1-bc-b` egress is the shared and uniquely lowest-capacity bottleneck.
+TCP segmentation and generic segmentation/receive offloads are disabled and
+verified on every veth endpoint so host-side aggregation does not silently
+change the packetization observed by HTB and netem.
 
 The same environmental capacities and delay are applied in `baseline` and
 `adapt`. In `baseline`, all measured traffic uses the default best-effort HTB
@@ -58,3 +61,12 @@ Backend application, readback, preflight, process exit, sample completeness,
 and simultaneous-window checks fail closed. A failure produces an atomic
 failure summary and a non-zero process exit. Control-plane, data-plane,
 preparation, and total script timings are stored separately.
+
+Mock control-domain evidence is accepted only when its normalized request and
+technology-specific plan preserve the supported semantic projection. NETCONF
+materializes class and bandwidth leaves. The current P4 target materializes
+only the priority-to-DSCP projection; bandwidth fields are retained as input
+metadata and explicitly recorded as not materialized. A simulated RPC success
+without the expected projection is rejected. Cleanup terminates residual
+processes in the named namespaces before removing the topology, including
+failed iperf3 startup paths.

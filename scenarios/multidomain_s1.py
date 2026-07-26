@@ -530,6 +530,26 @@ def _netconf_snapshot_matches(
     return str(int(intent.bandwidth_max_mbps)) in maximum_values
 
 
+def _dscp_for_class(class_name: str) -> int:
+    """Return the deterministic P4 priority projection used by the backend."""
+
+    digits = "".join(
+        character
+        for character in str(class_name).lower()
+        if character.isdigit()
+    )
+    value = int(digits) if digits else 0
+    if value >= 40:
+        return 32
+    if value >= 30:
+        return 24
+    if value >= 20:
+        return 16
+    if value >= 10:
+        return 8
+    return 0
+
+
 def _gate_control_domain(
     *,
     domain: str,
@@ -552,16 +572,61 @@ def _gate_control_domain(
         if backend_mode == "mock":
             planned = response.get("planned")
             execution = response.get("executed") or response.get("exec")
-            if (
+            request = response.get("request")
+            expected_intent = intent.to_backend_intent()
+            normalized = (
+                request.get("normalized_intent")
+                if isinstance(request, dict)
+                else None
+            )
+            common_ok = (
                 isinstance(planned, dict)
                 and isinstance(execution, dict)
+                and isinstance(request, dict)
                 and execution.get("simulated") is True
                 and execution.get("ok") is True
-            ):
+                and request.get("intent") == expected_intent
+                and normalized == expected_intent
+            )
+            domain_semantics_ok = False
+            success_message = ""
+            if domain == "B" and common_ok:
+                domain_semantics_ok = _netconf_snapshot_matches(
+                    str(request.get("xml", "")),
+                    intent,
+                )
+                success_message = (
+                    "mock NETCONF class and bandwidth serialization recorded"
+                )
+            elif domain == "C" and common_ok:
+                expected_dscp = _dscp_for_class(
+                    str(expected_intent.get("class", "")),
+                )
+                projection = planned.get("materialized_projection")
+                domain_semantics_ok = (
+                    isinstance(projection, dict)
+                    and projection.get("source_class")
+                    == expected_intent.get("class")
+                    and projection.get("source_priority")
+                    == expected_intent.get("priority")
+                    and projection.get("new_dscp") == expected_dscp
+                    and request.get("new_dscp") == expected_dscp
+                    and set(planned.get("not_materialized", []))
+                    == {
+                        key
+                        for key in ("min_mbps", "max_mbps")
+                        if key in expected_intent
+                    }
+                )
+                success_message = (
+                    "mock P4 priority-to-DSCP projection recorded; "
+                    "bandwidth is not materialized by this target"
+                )
+            if common_ok and domain_semantics_ok:
                 return (
                     True,
                     json.dumps(response, ensure_ascii=False, indent=2),
-                    "mock plan and simulated execution recorded",
+                    success_message,
                 )
         elif domain == "B":
             snapshot = response.get("running_snapshot")
@@ -573,14 +638,22 @@ def _gate_control_domain(
         elif domain == "C":
             dump = response.get("readback_dump")
             installed_rule = response.get("installed_rule")
+            expected_dscp = _dscp_for_class(
+                intent.to_backend_intent().get("class", ""),
+            )
             if (
                 _readback_is_nonempty(dump)
                 and isinstance(installed_rule, dict)
                 and response.get("readback_verified") is True
                 and DESTINATION_IP in str(installed_rule.get("match", ""))
-                and installed_rule.get("new_dscp") is not None
+                and installed_rule.get("new_dscp") == expected_dscp
             ):
-                return True, str(dump), "P4 rule and table readback recorded"
+                return (
+                    True,
+                    str(dump),
+                    "P4 priority-to-DSCP rule and table readback recorded; "
+                    "bandwidth is not materialized by this target",
+                )
     return False, "", f"{domain} readback evidence is incomplete"
 
 
@@ -795,7 +868,15 @@ def _start_iperf_server(port: int) -> subprocess.Popen[str]:
             return process
         time.sleep(0.05)
 
-    stdout, stderr = process.communicate(timeout=2.0)
+    try:
+        stdout, stderr = process.communicate(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=2.0)
     raise S1ExecutionError(
         f"iperf3 server on port {port} did not become ready: "
         f"stdout={stdout!r} stderr={stderr!r}"
@@ -1597,6 +1678,7 @@ def execute(args: argparse.Namespace) -> Path:
                     "target": _mask_secret(target_b),
                     "gate_message": b_message,
                     "data_plane_role": "materialization-and-readback-only",
+                    "semantic_scope": "class-and-bandwidth",
                 }
             )
             atomic_write_json(artifacts["domain_b"], domain_b)
@@ -1625,6 +1707,7 @@ def execute(args: argparse.Namespace) -> Path:
                     "target": _mask_secret(target_c),
                     "gate_message": c_message,
                     "data_plane_role": "materialization-and-readback-only",
+                    "semantic_scope": "priority-to-dscp-only",
                 }
             )
             atomic_write_json(artifacts["domain_c"], domain_c)
@@ -1640,11 +1723,13 @@ def execute(args: argparse.Namespace) -> Path:
                 "applied": False,
                 "not_applied_reason": "baseline",
                 "data_plane_role": "materialization-and-readback-only",
+                "semantic_scope": "class-and-bandwidth",
             }
             domain_c = {
                 "applied": False,
                 "not_applied_reason": "baseline",
                 "data_plane_role": "materialization-and-readback-only",
+                "semantic_scope": "priority-to-dscp-only",
             }
             atomic_write_json(artifacts["domain_b"], domain_b)
             atomic_write_json(artifacts["domain_c"], domain_c)
