@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -89,6 +90,27 @@ def main() -> None:
     """Validate sources, profiles, schedules, retention, and analysis scope."""
 
     plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
+
+    require(
+        "AMENDMENT_001",
+        plan["amendments"]
+        == [
+            {
+                "amendment_id": "phase19-s1-amendment-001",
+                "applies_before": "foundation_campaign",
+                "basis": "static_summary_schema_alignment",
+                "changed_field": "analysis.primary_metric.field",
+                "new_value": "metrics.rtt_ms.p99",
+                "old_value": "metrics.rtt_p99_ms",
+                "outcome_definition_changed": False,
+                "outcome_independent": True,
+                "timing": (
+                    "after_excluded_real_preflight_before_foundation"
+                ),
+                "treatment_or_measurement_changed": False,
+            }
+        ],
+    )
 
     require(
         "VERSION_AND_STATUS",
@@ -333,12 +355,28 @@ def main() -> None:
         and analysis["estimand"] == "within-pair adapt minus baseline"
         and analysis["primary_metric"]
         == {
-            "field": "metrics.rtt_p99_ms",
+            "field": "metrics.rtt_ms.p99",
             "name": "rtt_p99_ms",
             "preferred_direction": "negative",
         }
         and analysis["within_run_probe_pseudoreplication_prohibited"]
         is True,
+    )
+    scenario_source = (
+        ROOT / plan["scenario"]["entrypoint"]
+    ).read_text(encoding="utf-8")
+    require(
+        "PRIMARY_METRIC_SCHEMA",
+        re.search(
+            r'"rtt_ms"\s*:\s*data_plane\["rtt"\]\["rtt_ms"\]',
+            scenario_source,
+        )
+        is not None
+        and re.search(
+            r'"p99"\s*:\s*_percentile\(values,\s*0\.99\)',
+            scenario_source,
+        )
+        is not None,
     )
     require(
         "CAUSAL_SCOPE",

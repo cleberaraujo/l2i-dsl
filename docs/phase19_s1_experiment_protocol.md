@@ -19,6 +19,26 @@ exclusion: it evaluates backend health, application, readback, persistence, and
 cleanup, but it does not belong to either the foundation matrix or the final
 campaign.
 
+## Protocol amendment 001: primary-metric accessor
+
+After approval of the excluded real preflight and before any foundation
+execution, a static comparison between the machine-readable plan and the
+canonical summary schema identified that the plan named the primary outcome
+correctly but pointed to a nonexistent flat field, `metrics.rtt_p99_ms`. The
+canonical scenario records that same P99 RTT value at `metrics.rtt_ms.p99` and
+also exposes it as the selected percentile at `metrics.rtt_percentile_ms`.
+
+Amendment 001 changes only the machine-readable accessor from
+`metrics.rtt_p99_ms` to `metrics.rtt_ms.p99`. The primary outcome remains the
+within-pair difference `adapt - baseline` in P99 RTT, with negative values
+preferred. The correction does not change the scenario source, offered loads,
+topology, treatment, measurement procedure, conformance thresholds, schedule,
+retention rules, or causal scope. Its basis is the static output schema rather
+than any favorable, unfavorable, or null preflight measurement. The preceding
+real preflight remains operational evidence excluded from scientific analysis;
+its report was sealed as
+`51a07ed8edabaaf8fe14dd475361698e09e0e841433e8c251c0b10db25421157`.
+
 ## Fixed experimental configuration
 
 Every foundation or final S1 execution uses the canonical sensitive load of
