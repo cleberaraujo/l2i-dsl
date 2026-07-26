@@ -1650,7 +1650,10 @@ validate_phase19_experiment_contract() {
 
   # Validate the shared execution identity and artifact persistence contract.
   # This action is static and does not start services or execute S1/S2 traffic.
-  run "$PYTHON_BIN" \
+  run env \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" \
     "$REPO_DIR/scripts/validate_phase19_experiment_contract.py"
 }
 
