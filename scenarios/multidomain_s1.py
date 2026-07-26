@@ -1,215 +1,378 @@
-# -*- coding: utf-8 -*-
-"""
-S1: Unicast QoS multi-domínios (A/B/C).
+#!/usr/bin/env python3
+"""Canonical S1: contention-aware unicast QoS across control domains.
 
-Princípios (consistência metodológica):
-- --spec descreve a INTENÇÃO (requisitos das camadas superiores).
-- --bwA/--bwB/--bwC/--delay-ms descrevem o AMBIENTE experimental (o que o testbed oferece),
-  tipicamente configurado pelo administrador/operador.
-- bw*/delay NÃO sobrescrevem o spec: configuram ambiente e são registrados no sumário.
+This module is the only canonical S1 entrypoint.  It preserves three different
+scientific objects instead of merging them into one timing or one success flag:
 
-Domínios:
-- A: Linux tc/htb (local, no namespace do host origem)
-- B: NETCONF (real via ncclient ou mock)
-- C: P4Runtime (real via gRPC ou mock)
+* the immutable experiment identity and configuration;
+* control-plane materialization and readback evidence;
+* data-plane observations collected during simultaneous contention.
 
-Artefatos (S1_{TS}.json + dumps por domínio):
-- dom_{A,B,C}.json (evidências e erros)
-- tc_dump_A (read-back do estado)
-- netconf_dump_B (read-back do running config)
-- p4_dump_C (read-back da tabela)
-- preflight_flow / preflight_be (ping)
-- iperf_flow / iperf_be (JSON do cliente)
-- rtt_flow.csv (amostras) + métricas derivadas
-
-Sumário inclui:
-- environment.be_mbps (tráfego concorrente)
-- intent (componentes reais, incluindo rtt_pctl)
-- metrics (flow_throughput_mbps e be_throughput_mbps separados)
-- conformance (latency_ok, bandwidth_ok, intent_ok)
-- timing (duration_ms, control_plane_ms.total + por domínio)
-
-Requisito de topologia (critério C1/C2):
-- O destino do FLOW é o host no domínio C (default: h3 / 10.0.0.3).
-- targets.C.dst_ip (quando existir) deve ser o MESMO IP do destino do flow,
-  para evitar ambiguidade metodológica.
+The measured forwarding path is a Linux bridge/veth testbed.  NETCONF and
+P4Runtime are exercised as heterogeneous control-domain materializations, but
+their targets are not forwarding this S1 traffic.  Consequently, the scenario
+records their apply/readback evidence without attributing throughput or RTT
+changes to either target.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
-import datetime
-import json
-import subprocess
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import asdict, dataclass
+from concurrent.futures import ThreadPoolExecutor
 import inspect
+import json
+import math
+from pathlib import Path
+import re
+import subprocess
+import threading
+import time
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+import xml.etree.ElementTree as ET
 
-# ---------------- util ----------------
+from l2i.backends.router import get_backends
+from l2i.experiment_contract import (
+    ExperimentContractError,
+    ExperimentIdentity,
+    ExperimentRunDirectory,
+    RepositoryProvenance,
+    atomic_write_json,
+    atomic_write_text,
+    build_run_manifest,
+    generate_execution_id,
+    sha256_file,
+    utc_now,
+    utc_rfc3339,
+)
 
-def utc_ts() -> str:
-    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
-
-def utc_iso() -> str:
-    return datetime.datetime.now(datetime.UTC).isoformat()
 
 ROOT = Path(__file__).resolve().parents[1]
-RES_DIR = ROOT / "results" / "S1"
-RES_DIR.mkdir(parents=True, exist_ok=True)
+SCENARIO_ID = "S1"
+DEFAULT_PROFILE_ID = "s1-canonical-v1"
 
-def run(cmd: List[str],
-        check: bool = True,
-        capture: bool = False,
-        ns: str | None = None) -> str | None:
-    if ns:
-        cmd = ["ip", "netns", "exec", ns, *cmd]
-    p = subprocess.run(cmd, text=True, capture_output=True)
-    if check and p.returncode != 0:
-        raise RuntimeError(
-            f"cmd failed: {' '.join(cmd)}\nRC={p.returncode}\nSTDOUT:\n{p.stdout}\nSTDERR:\n{p.stderr}"
+# The two offered loads originate in different namespaces and converge on the
+# same destination.  Both therefore traverse the same B->C egress interface.
+SENSITIVE_SOURCE_NS = "h1"
+BEST_EFFORT_SOURCE_NS = "h2"
+DESTINATION_NS = "h3"
+SENSITIVE_SOURCE_IP = "10.0.0.1"
+BEST_EFFORT_SOURCE_IP = "10.0.0.2"
+DESTINATION_IP = "10.0.0.3"
+SENSITIVE_PORT = 5201
+BEST_EFFORT_PORT = 5202
+BOTTLENECK_INTERFACE = "s1-bc-b"
+
+# Each capacity is materialized on the egress that leads toward the next
+# segment.  The B segment must be the unique bottleneck in canonical S1 runs.
+ENVIRONMENT_LINKS = {
+    "A": "s1-ab-a",
+    "B": BOTTLENECK_INTERFACE,
+    "C": "h3-eth0-br",
+}
+
+
+class S1ExecutionError(RuntimeError):
+    """Raised when one canonical S1 gate fails closed."""
+
+
+@dataclass(frozen=True)
+class S1Intent:
+    """Normalized subset of L2i used by the canonical S1 experiment."""
+
+    flow_id: str
+    latency_percentile: str
+    latency_max_ms: float
+    bandwidth_min_mbps: float
+    bandwidth_max_mbps: Optional[float]
+    priority: str
+
+    def to_backend_intent(self) -> Dict[str, Any]:
+        """Return the technology-neutral intent passed to B and C backends."""
+
+        payload: Dict[str, Any] = {
+            "class": "prio10",
+            "min_mbps": self.bandwidth_min_mbps,
+            "priority": self.priority,
+        }
+        # Absence is semantically meaningful: no intent-level maximum was
+        # declared.  Do not silently convert an absent bound into zero.
+        if self.bandwidth_max_mbps is not None:
+            payload["max_mbps"] = self.bandwidth_max_mbps
+        return payload
+
+
+@dataclass(frozen=True)
+class TimedCommand:
+    """Observed result and time window for one data-plane command."""
+
+    name: str
+    argv: List[str]
+    returncode: int
+    stdout: str
+    stderr: str
+    started_offset_s: float
+    ended_offset_s: float
+    elapsed_s: float
+
+    def evidence(self) -> Dict[str, Any]:
+        """Return metadata without duplicating potentially large stdout."""
+
+        return {
+            "name": self.name,
+            "argv": self.argv,
+            "returncode": self.returncode,
+            "started_offset_s": self.started_offset_s,
+            "ended_offset_s": self.ended_offset_s,
+            "elapsed_s": self.elapsed_s,
+            "stdout_bytes": len(self.stdout.encode("utf-8")),
+            "stderr_bytes": len(self.stderr.encode("utf-8")),
+        }
+
+
+def _mask_secret(
+    value: Optional[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return a shallow copy with common credential fields redacted."""
+
+    if value is None:
+        return None
+    masked = dict(value)
+    for key in ("password", "pass", "secret"):
+        if key in masked and masked[key] is not None:
+            masked[key] = "***"
+    return masked
+
+
+def _positive_float(value: Any, label: str) -> float:
+    """Parse a strictly positive finite number."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise S1ExecutionError(f"{label} must be numeric") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise S1ExecutionError(f"{label} must be greater than zero")
+    return number
+
+
+def _nonnegative_float(value: Any, label: str) -> float:
+    """Parse a finite number that may be zero."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise S1ExecutionError(f"{label} must be numeric") from exc
+    if not math.isfinite(number) or number < 0:
+        raise S1ExecutionError(f"{label} must not be negative")
+    return number
+
+
+def _load_specification(path: Path) -> Tuple[Dict[str, Any], S1Intent]:
+    """Load and validate the canonical S1 syntax without legacy fallback."""
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise S1ExecutionError(f"specification does not exist: {resolved}")
+    try:
+        document = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise S1ExecutionError(f"invalid JSON specification: {resolved}") from exc
+    if not isinstance(document, dict):
+        raise S1ExecutionError("the S1 specification must be a JSON object")
+
+    if document.get("l2i_version") != "0.1":
+        raise S1ExecutionError("canonical S1 requires l2i_version='0.1'")
+    for required in ("tenant", "scope", "flow", "requirements"):
+        if required not in document:
+            raise S1ExecutionError(
+                f"canonical S1 specification is missing {required!r}"
+            )
+
+    flow = document.get("flow")
+    if not isinstance(flow, dict) or not str(flow.get("id", "")).strip():
+        raise S1ExecutionError("canonical S1 requires flow.id")
+    if "flow_id" in document:
+        raise S1ExecutionError(
+            "legacy flow_id is not allowed when canonical flow.id is used"
         )
-    return p.stdout if capture else None
 
-def safe_dump_json(path: Path, obj: Any) -> None:
-    try:
-        path.write_text(json.dumps(obj, ensure_ascii=False, indent=2))
-    except Exception as e:
-        path.write_text(json.dumps({"error": f"dump_failed: {e}"}, ensure_ascii=False, indent=2))
+    requirements = document.get("requirements")
+    if not isinstance(requirements, dict):
+        raise S1ExecutionError("requirements must be an object")
+    latency = requirements.get("latency")
+    bandwidth = requirements.get("bandwidth")
+    priority = requirements.get("priority")
+    multicast = requirements.get("multicast", {"enabled": False})
+    if not isinstance(latency, dict):
+        raise S1ExecutionError("S1 requires requirements.latency")
+    if not isinstance(bandwidth, dict):
+        raise S1ExecutionError("S1 requires requirements.bandwidth")
+    if not isinstance(priority, dict):
+        raise S1ExecutionError("S1 requires requirements.priority")
+    if not isinstance(multicast, dict) or multicast.get("enabled") is not False:
+        raise S1ExecutionError("S1 requires multicast.enabled=false")
 
-def load_json_or_fail(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(f"--spec file not found: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ValueError(f"Invalid JSON in spec: {path} ({e})") from e
+    percentile = str(latency.get("percentile", "")).upper()
+    if percentile not in {"P50", "P95", "P99"}:
+        raise S1ExecutionError(
+            "latency.percentile must be P50, P95, or P99"
+        )
+    latency_max_ms = _positive_float(
+        latency.get("max_ms"),
+        "requirements.latency.max_ms",
+    )
+    minimum = _positive_float(
+        bandwidth.get("min_mbps"),
+        "requirements.bandwidth.min_mbps",
+    )
+    maximum_raw = bandwidth.get("max_mbps")
+    maximum = (
+        _positive_float(
+            maximum_raw,
+            "requirements.bandwidth.max_mbps",
+        )
+        if maximum_raw is not None
+        else None
+    )
+    if maximum is not None and minimum > maximum:
+        raise S1ExecutionError(
+            "requirements.bandwidth.min_mbps must not exceed max_mbps"
+        )
 
-def _mask_secret(d: Dict[str, Any], keys: Tuple[str, ...] = ("password", "pass", "secret")) -> Dict[str, Any]:
-    out = dict(d)
-    for k in keys:
-        if k in out and out[k] is not None:
-            out[k] = "***"
-    return out
+    priority_level = str(priority.get("level", "")).lower()
+    if priority_level not in {"critical", "high", "medium", "low"}:
+        raise S1ExecutionError(
+            "requirements.priority.level is invalid"
+        )
 
-def _pctl_to_float(pctl: str) -> float:
-    p = str(pctl).strip().upper()
-    if p == "P50": return 0.50
-    if p == "P95": return 0.95
-    return 0.99  # default P99
-
-# ----------- RTT -----------
-
-def collect_rtt_samples(ns: str, dst_ip: str, samples: int, interval_ms: int, out_csv: Path) -> Tuple[int, int]:
-    """Coleta RTT via ping e grava CSV: seq,rtt_ms"""
-    awk = r"""awk '/time=/{idx++; sub(/time=/, "", $7); printf("%d,%.3f\n", idx, $7)}'"""
-    cmd = f"ping -n -i {interval_ms/1000.0:.3f} -c {samples} {dst_ip} | {awk}"
-    out = run(["bash", "-lc", cmd], check=True, capture=True, ns=ns) or ""
-    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    out_csv.write_text("\n".join(["seq,rtt_ms", *lines]))
-    return (len(lines), samples)
-
-def rtt_percentile_ms(csv_path: Path, pctl: float) -> Tuple[float, int]:
-    vals: List[float] = []
-    with csv_path.open() as f:
-        rd = csv.DictReader(f)
-        for r in rd:
-            try:
-                vals.append(float(r["rtt_ms"]))
-            except Exception:
-                pass
-    if not vals:
-        return (0.0, 0)
-    vals.sort()
-    k = (len(vals) - 1) * pctl
-    i = int(k)
-    d = k - i
-    if i + 1 < len(vals):
-        v = vals[i] * (1 - d) + vals[i + 1] * d
-    else:
-        v = vals[i]
-    return (round(v, 1), len(vals))
-
-# ----------- iperf3 -----------
-
-def run_iperf3_unicast(duration: int,
-                       mbps: float,
-                       out_json: Path,
-                       ns_cli: str,
-                       ns_srv: str,
-                       srv_ip: str,
-                       port: int) -> None:
-    # server
-    srv_cmd = ["ip", "netns", "exec", ns_srv, "iperf3", "-s", "-1", "-B", srv_ip, "-p", str(port)]
-    srv = subprocess.Popen(srv_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-    ready = False
-    for _ in range(50):
-        time.sleep(0.05)
-        try:
-            out = run(["ss", "-lntp"], ns=ns_srv, check=False, capture=True) or ""
-            if f":{port}" in out and "iperf3" in out:
-                ready = True
-                break
-        except Exception:
-            pass
-
-    if not ready:
-        serr = ""
-        try:
-            serr = srv.stderr.read() if srv.stderr else ""
-        except Exception:
-            pass
-        safe_dump_json(out_json, {"error": "iperf3 server not ready", "server_cmd": " ".join(srv_cmd), "server_stderr": serr})
-        try:
-            srv.kill()
-        except Exception:
-            pass
-        return
-
-    cli = subprocess.run(
-        ["ip", "netns", "exec", ns_cli, "iperf3",
-         "-c", srv_ip, "-p", str(port),
-         "-t", str(duration), "-b", f"{mbps}M", "--json"],
-        text=True,
-        capture_output=True,
+    return document, S1Intent(
+        flow_id=str(flow["id"]).strip(),
+        latency_percentile=percentile,
+        latency_max_ms=latency_max_ms,
+        bandwidth_min_mbps=minimum,
+        bandwidth_max_mbps=maximum,
+        priority=priority_level,
     )
 
-    if cli.returncode == 0 and cli.stdout.strip().startswith("{"):
-        out_json.write_text(cli.stdout)
-    else:
-        safe_dump_json(out_json, {"error": "iperf3 client failed", "stdout": cli.stdout, "stderr": cli.stderr})
+
+def _percentile(values: Sequence[float], quantile: float) -> float:
+    """Return a linearly interpolated percentile for a non-empty sequence."""
+
+    if not values:
+        raise S1ExecutionError("cannot compute a percentile from no samples")
+    ordered = sorted(float(value) for value in values)
+    position = (len(ordered) - 1) * quantile
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _percentile_fraction(label: str) -> float:
+    """Map one validated L2i percentile label to a numeric fraction."""
+
+    return {"P50": 0.50, "P95": 0.95, "P99": 0.99}[label]
+
+
+def _namespace_command(namespace: str, argv: Sequence[str]) -> List[str]:
+    """Qualify one command for execution inside a network namespace."""
+
+    # Parsing must not depend on the host locale.  iperf3 JSON and iputils
+    # packet summaries are therefore generated under the C locale.
+    return [
+        "ip",
+        "netns",
+        "exec",
+        namespace,
+        "env",
+        "LC_ALL=C",
+        *map(str, argv),
+    ]
+
+
+def _run_capture(
+    argv: Sequence[str],
+    *,
+    timeout_s: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run one command without a shell and preserve both output streams."""
 
     try:
-        srv.wait(timeout=2)
-    except Exception:
-        try:
-            srv.kill()
-        except Exception:
-            pass
+        return subprocess.run(
+            list(map(str, argv)),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            args=list(map(str, argv)),
+            returncode=124,
+            stdout=str(exc.stdout or ""),
+            stderr=str(exc.stderr or "") + "\ncommand timed out",
+        )
 
-def parse_iperf3_mbps(path: Path) -> float | None:
-    try:
-        j = json.loads(path.read_text())
-    except Exception:
-        return None
-    if isinstance(j, dict) and j.get("error") and "end" not in j:
-        return None
-    if isinstance(j, dict) and j.get("error"):
-        return None
-    try:
-        bps = j["end"]["sum_received"]["bits_per_second"]
-        return round(float(bps) / 1e6, 3) if bps else None
-    except Exception:
-        return None
 
-# ----------- Backends (A/B/C) -----------
+def _parse_ping_counts(output: str) -> Tuple[int, int]:
+    """Extract transmitted and received packet counts from iputils ping."""
 
-from l2i.backends.router import get_backends  # noqa: E402
+    match = re.search(
+        r"(\d+)\s+packets transmitted,\s+(\d+)\s+(?:packets )?received",
+        output,
+    )
+    if not match:
+        raise S1ExecutionError("ping output has no packet-count summary")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _run_preflight(
+    *,
+    source_namespace: str,
+    destination_ip: str,
+    artifact: Path,
+) -> Dict[str, Any]:
+    """Require complete reachability before any backend or traffic action."""
+
+    command = _namespace_command(
+        source_namespace,
+        ["ping", "-n", "-c", "3", "-W", "1", destination_ip],
+    )
+    completed = _run_capture(command, timeout_s=10.0)
+    combined = (
+        f"$ {' '.join(command)}\n"
+        f"returncode={completed.returncode}\n"
+        f"--- stdout ---\n{completed.stdout}"
+        f"\n--- stderr ---\n{completed.stderr}"
+    )
+    atomic_write_text(artifact, combined)
+    transmitted, received = _parse_ping_counts(completed.stdout)
+    valid = (
+        completed.returncode == 0
+        and transmitted == 3
+        and received == transmitted
+    )
+    evidence = {
+        "argv": command,
+        "returncode": completed.returncode,
+        "transmitted": transmitted,
+        "received": received,
+        "complete": valid,
+        "artifact": str(artifact),
+    }
+    if not valid:
+        raise S1ExecutionError(
+            f"preflight failed for {source_namespace}->{destination_ip}"
+        )
+    return evidence
 
 
 def _backend_failure_message(details: Any) -> str:
+    """Extract a useful message from a backend response."""
+
     if isinstance(details, dict):
         error = details.get("error")
         if isinstance(error, dict):
@@ -219,446 +382,1415 @@ def _backend_failure_message(details: Any) -> str:
     return str(details)
 
 
-def _apply_domain_a_backend(
-    mod: Any,
+def _call_apply_qos(
+    module: Any,
     *,
-    rate_mbps: float,
-    ns: str,
-    dev: str,
-    dry_run: bool = False,
-) -> Dict[str, Any]:
-    """Materializa o domínio A exclusivamente por meio do backend Linux TC.
+    domain_context: Dict[str, Any],
+    intent: Dict[str, Any],
+    target: Optional[Dict[str, Any]],
+) -> Any:
+    """Call historical two- or three-argument backend signatures."""
 
-    O cenário preserva apenas a orquestração metodológica. A construção e a
-    execução dos comandos ``tc`` ficam centralizadas no backend.
-    """
-
-    target = {
-        "namespace": ns,
-        "device": dev,
-        "dry_run": dry_run,
-        "filter_protocol": "icmp",
-        "filter_priority": 2,
-        "attach_priority_netem": False,
-        "idempotent_cleanup": False,
-    }
-
-    setup = getattr(mod, "setup_environment")
-    apply = getattr(mod, "apply_qos")
-
-    env_ok, env = setup(
-        {"name": "A"},
-        {
-            "bw_mbps": rate_mbps,
-            "create_default_class": False,
-        },
-        target,
-    )
-    if not env_ok:
-        raise RuntimeError(
-            "Linux TC environment setup failed: "
-            + _backend_failure_message(env)
-        )
-
-    qos_ok, qos = apply(
-        {"name": "A"},
-        {
-            "class": "prio10",
-            "min_mbps": rate_mbps,
-            "max_mbps": rate_mbps,
-        },
-        target,
-    )
-    if not qos_ok:
-        raise RuntimeError(
-            "Linux TC QoS application failed: "
-            + _backend_failure_message(qos)
-        )
-
-    commands = [
-        *(env.get("planned", {}).get("cmds", []) or []),
-        *(qos.get("planned", {}).get("cmds", []) or []),
-    ]
-    readback = qos.get("readback", {}) or {}
-
-    return {
-        "commands": list(commands),
-        "readback": {
-            "qdisc": str(readback.get("qdisc", "")),
-            "class": str(readback.get("class", "")),
-            "filter": str(readback.get("filter", "")),
-        },
-        "backend_details": {
-            "environment": env,
-            "qos": qos,
-        },
-        "simulated": bool(dry_run),
-    }
-
-def _call_apply_qos(mod: Any,
-                    domain_ctx: Dict[str, Any],
-                    intent: Dict[str, Any],
-                    target: Optional[Dict[str, Any]]) -> Any:
-    fn = getattr(mod, "apply_qos")
-    sig = inspect.signature(fn)
-    nparams = len(sig.parameters)
-    if nparams >= 3:
+    function = getattr(module, "apply_qos")
+    parameter_count = len(inspect.signature(function).parameters)
+    if parameter_count >= 3:
         try:
-            return fn(domain_ctx, intent, target)
+            return function(domain_context, intent, target)
         except TypeError:
-            return fn(domain_ctx.get("name", "X"), intent, target)
-    return fn(domain_ctx, intent)
+            return function(domain_context.get("name", "X"), intent, target)
+    return function(domain_context, intent)
+
 
 def _normalize_backend_result(raw: Any) -> Tuple[bool, Any]:
-    if isinstance(raw, (list, tuple)) and len(raw) == 2 and isinstance(raw[0], bool):
+    """Normalize the backend result forms retained by the artifact."""
+
+    if (
+        isinstance(raw, (list, tuple))
+        and len(raw) == 2
+        and isinstance(raw[0], bool)
+    ):
         return raw[0], raw[1]
     if isinstance(raw, dict) and isinstance(raw.get("applied"), bool):
         return raw["applied"], raw
     return True, raw
 
-def _apply_backend_chain(mod_or_list: Any,
-                         domain_ctx: Dict[str, Any],
-                         intent: Dict[str, Any],
-                         target: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    mods = mod_or_list if isinstance(mod_or_list, (list, tuple)) else [mod_or_list]
-    responses = []
+
+def _apply_backend_chain(
+    modules: Any,
+    *,
+    domain_name: str,
+    intent: Dict[str, Any],
+    target: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Apply every backend in one domain and retain every failure."""
+
+    chain = modules if isinstance(modules, (list, tuple)) else [modules]
+    if not chain or any(module is None for module in chain):
+        return {
+            "applied": False,
+            "responses": [],
+            "error": "backend router returned an empty module chain",
+        }
+
+    responses: List[Dict[str, Any]] = []
     all_applied = True
-    for m in mods:
-        bname = getattr(m, "__name__", str(m))
+    for module in chain:
+        backend_name = getattr(module, "__name__", str(module))
         try:
-            raw = _call_apply_qos(m, domain_ctx=domain_ctx, intent=intent, target=target)
-            applied, info = _normalize_backend_result(raw)
-            if not applied:
-                all_applied = False
-            responses.append({"backend": bname, "applied": applied, "response": info})
-        except Exception as e:
+            raw = _call_apply_qos(
+                module,
+                domain_context={"name": domain_name},
+                intent=intent,
+                target=target,
+            )
+            applied, response = _normalize_backend_result(raw)
+            all_applied = all_applied and bool(applied)
+            responses.append(
+                {
+                    "backend": backend_name,
+                    "applied": bool(applied),
+                    "response": response,
+                }
+            )
+        except Exception as exc:
             all_applied = False
-            responses.append({"backend": bname, "applied": False, "error": str(e)})
+            responses.append(
+                {
+                    "backend": backend_name,
+                    "applied": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
     return {"applied": all_applied, "responses": responses}
 
-def _load_real_targets_yaml() -> Dict[str, Any]:
+
+def _load_real_targets() -> Dict[str, Any]:
+    """Load real backend endpoints while keeping credentials out of summaries."""
+
     import yaml
-    ypath = ROOT / "l2i" / "backends" / "backends_real.yaml"
-    if not ypath.exists():
-        raise FileNotFoundError(f"Missing real-backends config: {ypath}")
-    return yaml.safe_load(ypath.read_text(encoding="utf-8")) or {}
 
-# ---------------- main ----------------
+    path = ROOT / "l2i" / "backends" / "backends_real.yaml"
+    if not path.is_file():
+        raise S1ExecutionError(f"real backend configuration is missing: {path}")
+    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(document, dict):
+        raise S1ExecutionError("real backend configuration must be a mapping")
+    return document
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--spec", required=True)
-    ap.add_argument("--duration", type=int, default=30)
-    ap.add_argument("--be-mbps", type=float, default=30.0)
-    ap.add_argument("--mode", choices=["baseline", "adapt"], default="baseline")
-    ap.add_argument("--backend", choices=["mock", "real"], default="mock")
-    ap.add_argument("--bwA", type=float, default=100.0)
-    ap.add_argument("--bwB", type=float, default=100.0)
-    ap.add_argument("--bwC", type=float, default=100.0)
-    ap.add_argument("--delay-ms", type=float, default=1.0)
-    ap.add_argument("--rtt-samples", type=int, default=80)
-    ap.add_argument("--rtt-interval-ms", type=int, default=50)
-    args = ap.parse_args()
 
-    # --- relógios (wall e monotônico) ---
-    t_wall_start_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    t0 = time.perf_counter()  # monotônico para duração total do script
+def _readback_is_nonempty(value: Any) -> bool:
+    """Reject absent and explicit failure placeholders as readback evidence."""
 
-    wall_start_iso = utc_iso()
-    t_wall0 = time.time()
-    t_cp0 = time.perf_counter()
-    cp_breakdown = {
-        "parse_ms": 0.0,
-        "materialize_ms": 0.0,
-        "apply_A_ms": 0.0,
-        "apply_B_ms": 0.0,
-        "apply_C_ms": 0.0,
-        "readback_ms": 0.0,
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    return not any(
+        marker in lowered
+        for marker in (
+            "[no_dump]",
+            "[readback_failed]",
+            "[error]",
+        )
+    )
+
+
+def _netconf_snapshot_matches(
+    snapshot: str,
+    intent: S1Intent,
+) -> bool:
+    """Verify that NETCONF readback preserves optional-bound semantics."""
+
+    try:
+        root = ET.fromstring(snapshot)
+    except ET.ParseError:
+        return False
+
+    values: Dict[str, List[str]] = {}
+    for element in root.iter():
+        local_name = element.tag.rsplit("}", 1)[-1]
+        if local_name in {"class", "min-mbps", "max-mbps"}:
+            values.setdefault(local_name, []).append(
+                str(element.text or "").strip()
+            )
+
+    expected_minimum = str(int(intent.bandwidth_min_mbps))
+    if (
+        not intent.bandwidth_min_mbps.is_integer()
+        or expected_minimum not in values.get("min-mbps", [])
+        or "prio10" not in values.get("class", [])
+    ):
+        return False
+
+    maximum_values = values.get("max-mbps", [])
+    if intent.bandwidth_max_mbps is None:
+        return not maximum_values
+    if not intent.bandwidth_max_mbps.is_integer():
+        return False
+    return str(int(intent.bandwidth_max_mbps)) in maximum_values
+
+
+def _gate_control_domain(
+    *,
+    domain: str,
+    backend_mode: str,
+    result: Dict[str, Any],
+    intent: S1Intent,
+) -> Tuple[bool, str, str]:
+    """Validate apply and readback evidence for one non-forwarding domain."""
+
+    if not result.get("applied"):
+        return False, "", f"{domain} backend application failed"
+    responses = result.get("responses")
+    if not isinstance(responses, list) or not responses:
+        return False, "", f"{domain} backend returned no response"
+
+    for item in responses:
+        response = item.get("response")
+        if not isinstance(response, dict):
+            continue
+        if backend_mode == "mock":
+            planned = response.get("planned")
+            execution = response.get("executed") or response.get("exec")
+            if (
+                isinstance(planned, dict)
+                and isinstance(execution, dict)
+                and execution.get("simulated") is True
+                and execution.get("ok") is True
+            ):
+                return (
+                    True,
+                    json.dumps(response, ensure_ascii=False, indent=2),
+                    "mock plan and simulated execution recorded",
+                )
+        elif domain == "B":
+            snapshot = response.get("running_snapshot")
+            if (
+                _readback_is_nonempty(snapshot)
+                and _netconf_snapshot_matches(str(snapshot), intent)
+            ):
+                return True, str(snapshot), "NETCONF running readback recorded"
+        elif domain == "C":
+            dump = response.get("readback_dump")
+            installed_rule = response.get("installed_rule")
+            if (
+                _readback_is_nonempty(dump)
+                and isinstance(installed_rule, dict)
+                and response.get("readback_verified") is True
+                and DESTINATION_IP in str(installed_rule.get("match", ""))
+                and installed_rule.get("new_dscp") is not None
+            ):
+                return True, str(dump), "P4 rule and table readback recorded"
+    return False, "", f"{domain} readback evidence is incomplete"
+
+
+def _setup_linux_environment(
+    *,
+    module: Any,
+    capacities: Mapping[str, float],
+    delay_ms: float,
+    protected_minimum_mbps: float,
+) -> Tuple[Dict[str, Any], float]:
+    """Materialize identical baseline/adapt link conditions on A, B, and C."""
+
+    started = time.perf_counter()
+    segments: Dict[str, Any] = {}
+    setup = getattr(module, "setup_environment")
+    for segment in ("A", "B", "C"):
+        # Reserve exactly the declared sensitive minimum at the shared
+        # bottleneck.  The default class may still borrow up to full capacity,
+        # so baseline behavior is not artificially capped.
+        default_rate = (
+            capacities[segment] - protected_minimum_mbps
+            if segment == "B"
+            else capacities[segment]
+        )
+        target = {
+            "device": ENVIRONMENT_LINKS[segment],
+            "default_class": "prio30",
+            # HTB class identifiers do not imply priority.  Explicitly assign
+            # the lowest scheduler priority to the best-effort class.
+            "default_priority": 7,
+            "default_rate_mbps": default_rate,
+            "default_ceil_mbps": capacities[segment],
+            "attach_netem": True,
+            "delay_ms": delay_ms,
+            "idempotent_cleanup": True,
+        }
+        ok, details = setup(
+            {"name": segment},
+            {
+                "bw_mbps": capacities[segment],
+                "delay_ms": delay_ms,
+                "create_default_class": True,
+                "default_priority": 7,
+                "default_rate_mbps": default_rate,
+                "default_ceil_mbps": capacities[segment],
+                "attach_netem": True,
+            },
+            target,
+        )
+        segments[segment] = details
+        if not ok:
+            raise S1ExecutionError(
+                f"Linux environment setup failed on segment {segment}: "
+                + _backend_failure_message(details)
+            )
+        checks = details.get("readback_checks")
+        if not isinstance(checks, dict) or not all(checks.values()):
+            raise S1ExecutionError(
+                f"Linux environment readback failed on segment {segment}"
+            )
+    return segments, (time.perf_counter() - started) * 1000.0
+
+
+def _apply_sensitive_overlay(
+    *,
+    module: Any,
+    intent: S1Intent,
+    bottleneck_capacity_mbps: float,
+    delay_ms: float,
+) -> Tuple[Dict[str, Any], float, float]:
+    """Classify sensitive TCP and RTT probes into one protected HTB class."""
+
+    realization_ceil = (
+        min(intent.bandwidth_max_mbps, bottleneck_capacity_mbps)
+        if intent.bandwidth_max_mbps is not None
+        else bottleneck_capacity_mbps
+    )
+    if realization_ceil < intent.bandwidth_min_mbps:
+        raise S1ExecutionError(
+            "the bottleneck cannot realize the declared minimum bandwidth"
+        )
+
+    target = {
+        "device": BOTTLENECK_INTERFACE,
+        "default_class": "prio30",
+        "htb_priority": 0,
+        "priority_delay_ms": delay_ms,
+        "attach_priority_netem": True,
+        "idempotent_cleanup": True,
+        "classifiers": [
+            {
+                "protocol": "tcp",
+                "dst_ip": DESTINATION_IP,
+                "dst_port": SENSITIVE_PORT,
+                "filter_priority": 1,
+            },
+            {
+                "protocol": "icmp",
+                "dst_ip": DESTINATION_IP,
+                "filter_priority": 2,
+            },
+        ],
+    }
+    realization_intent = {
+        "class": "prio10",
+        "min_mbps": intent.bandwidth_min_mbps,
+        # The physical ceiling is a realization constraint.  It is not written
+        # back into the immutable L2i specification as an intent maximum.
+        "max_mbps": realization_ceil,
     }
 
-    # --- load spec (parse_ms) ---
-    t_parse0 = time.perf_counter()
-    spec_path = Path(args.spec)
-    spec = load_json_or_fail(spec_path)
-    parse_ms = (time.perf_counter() - t_parse0) * 1000.0
+    started = time.perf_counter()
+    ok, details = module.apply_qos(
+        {"name": "A", "role": "measured-bottleneck"},
+        realization_intent,
+        target,
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if not ok:
+        raise S1ExecutionError(
+            "Linux sensitive-flow overlay failed: "
+            + _backend_failure_message(details)
+        )
+    checks = details.get("readback_checks")
+    if not isinstance(checks, dict) or not all(checks.values()):
+        raise S1ExecutionError(
+            "Linux sensitive-flow overlay readback is incomplete"
+        )
+    classifiers = (details.get("intent") or {}).get("classifiers")
+    if not isinstance(classifiers, list) or len(classifiers) != 2:
+        raise S1ExecutionError(
+            "Linux overlay did not preserve both canonical classifiers"
+        )
+    return details, elapsed_ms, realization_ceil
 
-    req = spec.get("requirements", {}) or {}
-    lat = req.get("latency", {}) or {}
-    bw = req.get("bandwidth", {}) or {}
-    pr = req.get("priority", {}) or {}
 
-    rtt_pctl = str(lat.get("percentile", "P99")).upper()
-    rtt_p = _pctl_to_float(rtt_pctl)
-    latency_max_ms = float(lat.get("max_ms", 0))
-    bw_min = float(bw.get("min_mbps", 0))
-    bw_max = float(bw.get("max_mbps", 0))
-    prio = str(pr.get("level", "high")).lower()
+def _format_tc_dump(
+    *,
+    environment: Mapping[str, Any],
+    overlay: Optional[Mapping[str, Any]],
+) -> str:
+    """Create one human-readable readback artifact for the Linux data path."""
 
-    intent = {
-        "rtt_pctl": rtt_pctl,
-        "latency_max_ms": latency_max_ms,
-        "bandwidth_min_mbps": bw_min,
-        "bandwidth_max_mbps": bw_max,
-        "priority": prio,
+    sections: List[str] = []
+    for segment in ("A", "B", "C"):
+        details = environment.get(segment) or {}
+        readback = details.get("readback") or {}
+        sections.extend(
+            [
+                f"### segment {segment} device={ENVIRONMENT_LINKS[segment]}",
+                "## qdisc",
+                str(readback.get("qdisc", "")),
+                "## class",
+                str(readback.get("class", "")),
+                "## filter",
+                str(readback.get("filter", "")),
+                "",
+            ]
+        )
+    if overlay is not None:
+        readback = overlay.get("readback") or {}
+        sections.extend(
+            [
+                "### adapt overlay on shared bottleneck",
+                "## qdisc",
+                str(readback.get("qdisc", "")),
+                "## class",
+                str(readback.get("class", "")),
+                "## filter",
+                str(readback.get("filter", "")),
+                "",
+            ]
+        )
+    return "\n".join(sections)
+
+
+def _server_ready(namespace: str, port: int) -> bool:
+    """Check whether one iperf3 server is listening in the destination."""
+
+    completed = _run_capture(
+        _namespace_command(namespace, ["ss", "-H", "-ltn"]),
+        timeout_s=2.0,
+    )
+    return completed.returncode == 0 and f":{port}" in completed.stdout
+
+
+def _start_iperf_server(port: int) -> subprocess.Popen[str]:
+    """Start one one-shot iperf3 server for a canonical flow."""
+
+    command = _namespace_command(
+        DESTINATION_NS,
+        [
+            "iperf3",
+            "-s",
+            "-1",
+            "-B",
+            DESTINATION_IP,
+            "-p",
+            str(port),
+        ],
+    )
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    for _ in range(100):
+        if process.poll() is not None:
+            break
+        if _server_ready(DESTINATION_NS, port):
+            return process
+        time.sleep(0.05)
+
+    stdout, stderr = process.communicate(timeout=2.0)
+    raise S1ExecutionError(
+        f"iperf3 server on port {port} did not become ready: "
+        f"stdout={stdout!r} stderr={stderr!r}"
+    )
+
+
+def _finish_server(
+    process: subprocess.Popen[str],
+    *,
+    port: int,
+) -> Dict[str, Any]:
+    """Collect server output and prevent a failed client from leaking a process."""
+
+    try:
+        stdout, stderr = process.communicate(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=2.0)
+    return {
+        "port": port,
+        "returncode": process.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
     }
 
-    # --- endpoints (C1/C2): FLOW dst é domínio C ---
-    host_ip = {"h1": "10.0.0.1", "h2": "10.0.0.2", "h3": "10.0.0.3", "h4": "10.0.0.4"}
-    ns_src = "h1"
-    ns_flow_dst = "h3"      # domínio C
-    ip_flow_dst = host_ip[ns_flow_dst]
-    ns_be_dst = "h2"        # domínio B (tráfego concorrente)
-    ip_be_dst = host_ip[ns_be_dst]
 
-    # --- backends and targets ---
-    backends = get_backends(args.backend)
-    A_mod = backends.get("A")
-    B_mods = backends.get("B")
-    C_mods = backends.get("C")
+def _run_timed_command(
+    *,
+    name: str,
+    argv: Sequence[str],
+    barrier: threading.Barrier,
+    reference: float,
+    timeout_s: float,
+) -> TimedCommand:
+    """Launch one command after a shared barrier and observe its actual window."""
 
-    real_cfg = {}
-    if args.backend == "real":
-        real_cfg = _load_real_targets_yaml()
+    barrier.wait(timeout=10.0)
+    started = time.perf_counter()
+    completed = _run_capture(argv, timeout_s=timeout_s)
+    ended = time.perf_counter()
+    return TimedCommand(
+        name=name,
+        argv=list(map(str, argv)),
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        started_offset_s=round(started - reference, 6),
+        ended_offset_s=round(ended - reference, 6),
+        elapsed_s=round(ended - started, 6),
+    )
 
-    target_B = (real_cfg.get("B", {}) or {}).get("target") if args.backend == "real" else None
-    target_C = (real_cfg.get("C", {}) or {}).get("target") if args.backend == "real" else None
 
-    # C2: alinhar dst_ip do target_C com destino do FLOW (evita ambiguidade)
-    if isinstance(target_C, dict):
-        target_C = dict(target_C)
-        target_C["dst_ip"] = ip_flow_dst
+def _derived_rtt_samples(duration_s: int, interval_ms: int) -> int:
+    """Cover the offered-load interval instead of probing only after traffic."""
 
-    # --- artifacts paths ---
-    ts = utc_ts()
-    domA = RES_DIR / f"S1_{ts}_dom_A.json"
-    domB = RES_DIR / f"S1_{ts}_dom_B.json"
-    domC = RES_DIR / f"S1_{ts}_dom_C.json"
+    return max(2, int(math.ceil(duration_s * 1000.0 / interval_ms)) + 1)
 
-    tc_dump_A = RES_DIR / f"S1_{ts}_tc_dump_A.txt"
-    netconf_dump_B = RES_DIR / f"S1_{ts}_netconf_dump_B.txt"
-    p4_dump_C = RES_DIR / f"S1_{ts}_p4_dump_C.txt"
 
-    pre_flow = RES_DIR / f"S1_{ts}_preflight_flow.txt"
-    pre_be = RES_DIR / f"S1_{ts}_preflight_be.txt"
+def _parse_iperf_result(result: TimedCommand) -> Dict[str, Any]:
+    """Reject missing, failed, or structurally incomplete iperf3 output."""
 
-    ipf_flow = RES_DIR / f"S1_{ts}_iperf_flow.json"
-    ipf_be = RES_DIR / f"S1_{ts}_iperf_be.json"
+    if result.returncode != 0:
+        raise S1ExecutionError(
+            f"{result.name} exited with status {result.returncode}"
+        )
+    try:
+        document = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise S1ExecutionError(f"{result.name} did not emit JSON") from exc
+    if not isinstance(document, dict) or document.get("error"):
+        raise S1ExecutionError(
+            f"{result.name} reported an iperf3 error: {document.get('error')}"
+        )
+    try:
+        receiver = document["end"]["sum_received"]
+        bits_per_second = float(receiver["bits_per_second"])
+        seconds = float(receiver["seconds"])
+        byte_count = int(receiver["bytes"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise S1ExecutionError(
+            f"{result.name} receiver summary is incomplete"
+        ) from exc
+    if (
+        not math.isfinite(bits_per_second)
+        or bits_per_second <= 0
+        or not math.isfinite(seconds)
+        or seconds <= 0
+        or byte_count <= 0
+    ):
+        raise S1ExecutionError(
+            f"{result.name} receiver summary contains no valid measurement"
+        )
+    return {
+        "throughput_mbps": bits_per_second / 1_000_000.0,
+        "receiver_seconds": seconds,
+        "receiver_bytes": byte_count,
+    }
 
-    rtt_flow_csv = RES_DIR / f"S1_{ts}_rtt_flow.csv"
-    summary = RES_DIR / f"S1_{ts}.json"
 
-    # --- summary skeleton ---
-    s1: Dict[str, Any] = {
-        "scenario": "S1_unicast_qos",
-        "flow_id": (spec.get("flow", {}) or {}).get("id", "S1_UnicastQoS"),
-        "timestamp_utc": ts,
-        "mode": args.mode,
-        "backend_mode": args.backend,
-        "spec_path": str(spec_path),
-        "spec_exists": True,
-        "environment": {
-            "bwA_mbps": args.bwA,
-            "bwB_mbps": args.bwB,
-            "bwC_mbps": args.bwC,
-            "delay_ms": args.delay_ms,
-            "be_mbps": args.be_mbps,
+def _parse_ping_measurement(
+    *,
+    result: TimedCommand,
+    requested_samples: int,
+    csv_path: Path,
+) -> Dict[str, Any]:
+    """Parse RTT while rejecting any empty or incomplete sample set."""
+
+    transmitted, received = _parse_ping_counts(result.stdout)
+    sample_pattern = re.compile(r"\btime[=<]([0-9]+(?:\.[0-9]+)?)\s*ms")
+    values = [float(match) for match in sample_pattern.findall(result.stdout)]
+
+    rows = ["seq,rtt_ms"]
+    rows.extend(
+        f"{index},{value:.6f}"
+        for index, value in enumerate(values, start=1)
+    )
+    atomic_write_text(csv_path, "\n".join(rows) + "\n")
+
+    complete = (
+        result.returncode == 0
+        and transmitted == requested_samples
+        and received == requested_samples
+        and len(values) == requested_samples
+    )
+    evidence: Dict[str, Any] = {
+        "requested": requested_samples,
+        "transmitted": transmitted,
+        "received": received,
+        "parsed_samples": len(values),
+        "delivery_ratio": (
+            received / transmitted if transmitted > 0 else 0.0
+        ),
+        "complete": complete,
+    }
+    if not values:
+        raise S1ExecutionError("RTT measurement contains no samples")
+
+    evidence["rtt_ms"] = {
+        "p50": _percentile(values, 0.50),
+        "p95": _percentile(values, 0.95),
+        "p99": _percentile(values, 0.99),
+        "minimum": min(values),
+        "maximum": max(values),
+    }
+    if not complete:
+        raise S1ExecutionError(
+            "RTT measurement is incomplete; missing probes cannot be "
+            "silently excluded from conformance"
+        )
+    return evidence
+
+
+def _run_data_plane(
+    *,
+    duration_s: int,
+    flow_mbps: float,
+    best_effort_mbps: float,
+    rtt_interval_ms: int,
+    rtt_samples: Optional[int],
+    artifacts: Mapping[str, Path],
+) -> Dict[str, Any]:
+    """Run both TCP loads and RTT probes over one simultaneous time window."""
+
+    sample_count = (
+        rtt_samples
+        if rtt_samples is not None
+        else _derived_rtt_samples(duration_s, rtt_interval_ms)
+    )
+    sensitive_server: Optional[subprocess.Popen[str]] = None
+    best_effort_server: Optional[subprocess.Popen[str]] = None
+    server_evidence: List[Dict[str, Any]] = []
+
+    try:
+        sensitive_server = _start_iperf_server(SENSITIVE_PORT)
+        best_effort_server = _start_iperf_server(BEST_EFFORT_PORT)
+
+        reference = time.perf_counter()
+        barrier = threading.Barrier(4)
+        sensitive_command = _namespace_command(
+            SENSITIVE_SOURCE_NS,
+            [
+                "iperf3",
+                "-c",
+                DESTINATION_IP,
+                "-p",
+                str(SENSITIVE_PORT),
+                "-t",
+                str(duration_s),
+                "-b",
+                f"{flow_mbps}M",
+                "--json",
+            ],
+        )
+        best_effort_command = _namespace_command(
+            BEST_EFFORT_SOURCE_NS,
+            [
+                "iperf3",
+                "-c",
+                DESTINATION_IP,
+                "-p",
+                str(BEST_EFFORT_PORT),
+                "-t",
+                str(duration_s),
+                "-b",
+                f"{best_effort_mbps}M",
+                "--json",
+            ],
+        )
+        ping_command = _namespace_command(
+            SENSITIVE_SOURCE_NS,
+            [
+                "ping",
+                "-n",
+                "-i",
+                f"{rtt_interval_ms / 1000.0:.3f}",
+                "-c",
+                str(sample_count),
+                "-W",
+                "1",
+                DESTINATION_IP,
+            ],
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=3,
+            thread_name_prefix="s1-data-plane",
+        ) as executor:
+            futures = {
+                "sensitive_tcp": executor.submit(
+                    _run_timed_command,
+                    name="sensitive_tcp",
+                    argv=sensitive_command,
+                    barrier=barrier,
+                    reference=reference,
+                    timeout_s=duration_s + 30.0,
+                ),
+                "best_effort_tcp": executor.submit(
+                    _run_timed_command,
+                    name="best_effort_tcp",
+                    argv=best_effort_command,
+                    barrier=barrier,
+                    reference=reference,
+                    timeout_s=duration_s + 30.0,
+                ),
+                "rtt_probes": executor.submit(
+                    _run_timed_command,
+                    name="rtt_probes",
+                    argv=ping_command,
+                    barrier=barrier,
+                    reference=reference,
+                    timeout_s=duration_s + 30.0,
+                ),
+            }
+            # The main thread is the fourth barrier participant.  No command
+            # can begin until all three workers have reached this point.
+            barrier.wait(timeout=10.0)
+            results = {
+                name: future.result()
+                for name, future in futures.items()
+            }
+
+        # Collect both server processes before parsing metrics so every process
+        # exit code participates in the fail-closed execution gate.
+        server_evidence.append(
+            _finish_server(
+                sensitive_server,
+                port=SENSITIVE_PORT,
+            )
+        )
+        sensitive_server = None
+        server_evidence.append(
+            _finish_server(
+                best_effort_server,
+                port=BEST_EFFORT_PORT,
+            )
+        )
+        best_effort_server = None
+        atomic_write_json(
+            artifacts["iperf_servers_json"],
+            server_evidence,
+        )
+        if any(
+            server.get("returncode") != 0
+            for server in server_evidence
+        ):
+            raise S1ExecutionError(
+                "one or more iperf3 servers exited with a non-zero status"
+            )
+
+        sensitive = results["sensitive_tcp"]
+        best_effort = results["best_effort_tcp"]
+        rtt = results["rtt_probes"]
+
+        atomic_write_text(
+            artifacts["iperf_sensitive_json"],
+            sensitive.stdout,
+        )
+        atomic_write_text(
+            artifacts["iperf_sensitive_stderr"],
+            sensitive.stderr,
+        )
+        atomic_write_text(
+            artifacts["iperf_best_effort_json"],
+            best_effort.stdout,
+        )
+        atomic_write_text(
+            artifacts["iperf_best_effort_stderr"],
+            best_effort.stderr,
+        )
+        atomic_write_text(artifacts["rtt_stdout"], rtt.stdout)
+        atomic_write_text(artifacts["rtt_stderr"], rtt.stderr)
+
+        sensitive_metrics = _parse_iperf_result(sensitive)
+        best_effort_metrics = _parse_iperf_result(best_effort)
+        rtt_metrics = _parse_ping_measurement(
+            result=rtt,
+            requested_samples=sample_count,
+            csv_path=artifacts["rtt_csv"],
+        )
+
+        starts = [
+            result.started_offset_s
+            for result in results.values()
+        ]
+        ends = [
+            result.ended_offset_s
+            for result in results.values()
+        ]
+        overlap_s = max(0.0, min(ends) - max(starts))
+        minimum_overlap_s = duration_s * 0.90
+        overlap_complete = overlap_s >= minimum_overlap_s
+        if not overlap_complete:
+            raise S1ExecutionError(
+                "the observed simultaneous window is shorter than 90% "
+                "of the configured traffic duration"
+            )
+
+        return {
+            "commands": {
+                name: result.evidence()
+                for name, result in results.items()
+            },
+            "observed_windows": {
+                "simultaneous_overlap_s": round(overlap_s, 6),
+                "required_overlap_s": round(minimum_overlap_s, 6),
+                "complete": overlap_complete,
+            },
+            "sensitive": sensitive_metrics,
+            "best_effort": best_effort_metrics,
+            "rtt": rtt_metrics,
+            "exit_codes": {
+                **{
+                    name: result.returncode
+                    for name, result in results.items()
+                },
+                **{
+                    f"iperf_server_{server['port']}": server["returncode"]
+                    for server in server_evidence
+                },
+            },
+        }
+    finally:
+        if sensitive_server is not None:
+            server_evidence.append(
+                _finish_server(
+                    sensitive_server,
+                    port=SENSITIVE_PORT,
+                )
+            )
+        if best_effort_server is not None:
+            server_evidence.append(
+                _finish_server(
+                    best_effort_server,
+                    port=BEST_EFFORT_PORT,
+                )
+            )
+        if server_evidence:
+            atomic_write_json(
+                artifacts["iperf_servers_json"],
+                server_evidence,
+            )
+
+
+def _validate_arguments(args: argparse.Namespace, intent: S1Intent) -> None:
+    """Reject configurations that cannot exercise canonical S1 claims."""
+
+    if args.duration < 2:
+        raise S1ExecutionError("duration must be at least two seconds")
+    if args.repetition < 1:
+        raise S1ExecutionError("repetition must be greater than zero")
+    if args.rtt_interval_ms < 10:
+        raise S1ExecutionError("rtt-interval-ms must be at least 10")
+    if args.rtt_samples is not None and args.rtt_samples < 2:
+        raise S1ExecutionError("rtt-samples must be at least two")
+
+    capacities = {
+        "A": _positive_float(args.bwA, "bwA"),
+        "B": _positive_float(args.bwB, "bwB"),
+        "C": _positive_float(args.bwC, "bwC"),
+    }
+    flow_mbps = _positive_float(args.flow_mbps, "flow-mbps")
+    best_effort_mbps = _positive_float(args.be_mbps, "be-mbps")
+    _nonnegative_float(
+        args.bandwidth_tolerance_mbps,
+        "bandwidth-tolerance-mbps",
+    )
+    _nonnegative_float(args.delay_ms, "delay-ms")
+
+    if not (
+        capacities["B"] < capacities["A"]
+        and capacities["B"] < capacities["C"]
+    ):
+        raise S1ExecutionError(
+            "canonical S1 requires bwB to be the unique shared bottleneck"
+        )
+    if flow_mbps + best_effort_mbps <= capacities["B"]:
+        raise S1ExecutionError(
+            "offered loads must exceed bwB to create simultaneous contention"
+        )
+    if flow_mbps < intent.bandwidth_min_mbps:
+        raise S1ExecutionError(
+            "flow-mbps must be at least the declared bandwidth minimum"
+        )
+    if (
+        intent.bandwidth_max_mbps is not None
+        and flow_mbps > intent.bandwidth_max_mbps
+    ):
+        raise S1ExecutionError(
+            "flow-mbps must not exceed the declared bandwidth maximum"
+        )
+    if intent.bandwidth_min_mbps >= capacities["B"]:
+        raise S1ExecutionError(
+            "bwB must exceed the declared bandwidth minimum so best-effort "
+            "traffic retains a positive baseline share"
+        )
+
+
+def _require_canonical_provenance(
+    provenance: RepositoryProvenance,
+) -> None:
+    """Require the synchronized, clean develop state used by final evidence."""
+
+    failures: List[str] = []
+    if provenance.branch != "develop":
+        failures.append(f"branch={provenance.branch!r}")
+    if not provenance.worktree_clean:
+        failures.append("worktree is dirty")
+    if provenance.origin_commit is None:
+        failures.append("origin/develop is unavailable")
+    elif provenance.origin_commit != provenance.commit:
+        failures.append("HEAD differs from origin/develop")
+    if failures:
+        raise ExperimentContractError(
+            "canonical repository provenance gate failed: "
+            + "; ".join(failures)
+        )
+
+
+def _artifact_paths(
+    run_directory: ExperimentRunDirectory,
+) -> Dict[str, Path]:
+    """Resolve every artifact inside the collision-safe execution directory."""
+
+    names = {
+        "manifest": "manifest.json",
+        "summary": "summary.json",
+        "domain_a": "domain-A-linux-tc.json",
+        "domain_b": "domain-B-netconf.json",
+        "domain_c": "domain-C-p4runtime.json",
+        "tc_readback": "domain-A-linux-tc-readback.txt",
+        "netconf_readback": "domain-B-netconf-readback.txt",
+        "p4_readback": "domain-C-p4runtime-readback.txt",
+        "preflight_sensitive": "preflight-sensitive.txt",
+        "preflight_best_effort": "preflight-best-effort.txt",
+        "iperf_sensitive_json": "iperf-sensitive.json",
+        "iperf_sensitive_stderr": "iperf-sensitive.stderr.txt",
+        "iperf_best_effort_json": "iperf-best-effort.json",
+        "iperf_best_effort_stderr": "iperf-best-effort.stderr.txt",
+        "iperf_servers_json": "iperf-servers.json",
+        "rtt_stdout": "rtt-ping.stdout.txt",
+        "rtt_stderr": "rtt-ping.stderr.txt",
+        "rtt_csv": "rtt-samples.csv",
+        "artifact_hashes": "artifact-hashes.json",
+    }
+    return {
+        key: run_directory.artifact(name)
+        for key, name in names.items()
+    }
+
+
+def _configuration(
+    *,
+    args: argparse.Namespace,
+    intent: S1Intent,
+) -> Dict[str, Any]:
+    """Build the complete immutable configuration hashed by the contract."""
+
+    return {
+        "duration_s": args.duration,
+        "flow_offered_mbps": args.flow_mbps,
+        "best_effort_offered_mbps": args.be_mbps,
+        "capacities_mbps": {
+            "A": args.bwA,
+            "B": args.bwB,
+            "C": args.bwC,
         },
-        "endpoints": {
-            "flow": {"src": ns_src, "dst": ns_flow_dst, "dst_ip": ip_flow_dst},
-            "be": {"src": ns_src, "dst": ns_be_dst, "dst_ip": ip_be_dst},
+        "delay_ms_per_shaped_egress": args.delay_ms,
+        "rtt_interval_ms": args.rtt_interval_ms,
+        "rtt_samples": args.rtt_samples,
+        "bandwidth_tolerance_mbps": args.bandwidth_tolerance_mbps,
+        "topology": {
+            "sensitive_source": {
+                "namespace": SENSITIVE_SOURCE_NS,
+                "ip": SENSITIVE_SOURCE_IP,
+                "destination_port": SENSITIVE_PORT,
+            },
+            "best_effort_source": {
+                "namespace": BEST_EFFORT_SOURCE_NS,
+                "ip": BEST_EFFORT_SOURCE_IP,
+                "destination_port": BEST_EFFORT_PORT,
+            },
+            "destination": {
+                "namespace": DESTINATION_NS,
+                "ip": DESTINATION_IP,
+            },
+            "shared_bottleneck_interface": BOTTLENECK_INTERFACE,
+            "environment_links": ENVIRONMENT_LINKS,
         },
-        "targets": {
-            "B": _mask_secret(target_B or {}) if target_B else None,
-            "C": _mask_secret(target_C or {}) if target_C else None,
+        "intent_interpretation": asdict(intent),
+        "causal_scope": {
+            "forwarding_path": "linux-bridge-veth",
+            "traffic_effect_backend": "linux-tc",
+            "netconf": "materialization-and-readback-only",
+            "p4runtime": "materialization-and-readback-only",
         },
-        "intent": intent,
-        "backend_apply": {"A": False, "B": False, "C": False},
+    }
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Create the canonical command-line interface."""
+
+    parser = argparse.ArgumentParser(
+        description="Run canonical S1 with simultaneous contention and RTT.",
+    )
+    parser.add_argument("--spec", required=True)
+    parser.add_argument("--duration", type=int, default=30)
+    parser.add_argument("--flow-mbps", type=float, default=8.0)
+    parser.add_argument("--be-mbps", type=float, default=60.0)
+    parser.add_argument(
+        "--mode",
+        choices=("baseline", "adapt"),
+        default="baseline",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("mock", "real"),
+        default="mock",
+    )
+    parser.add_argument("--bwA", type=float, default=100.0)
+    parser.add_argument("--bwB", type=float, default=50.0)
+    parser.add_argument("--bwC", type=float, default=100.0)
+    parser.add_argument("--delay-ms", type=float, default=1.0)
+    parser.add_argument("--rtt-interval-ms", type=int, default=50)
+    parser.add_argument("--rtt-samples", type=int, default=None)
+    parser.add_argument(
+        "--bandwidth-tolerance-mbps",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument("--profile-id", default=DEFAULT_PROFILE_ID)
+    parser.add_argument("--repetition", type=int, default=1)
+    parser.add_argument(
+        "--execution-id",
+        default=None,
+        help="Optional preallocated identity; collisions are rejected.",
+    )
+    parser.add_argument(
+        "--results-root",
+        default=str(ROOT / "results"),
+    )
+    return parser
+
+
+def _write_artifact_hashes(
+    *,
+    artifacts: Mapping[str, Path],
+) -> None:
+    """Hash every completed artifact except the hash list itself."""
+
+    records: Dict[str, str] = {}
+    for key, path in sorted(artifacts.items()):
+        if key == "artifact_hashes" or not path.is_file():
+            continue
+        records[path.name] = sha256_file(path)
+    atomic_write_json(artifacts["artifact_hashes"], records)
+
+
+def execute(args: argparse.Namespace) -> Path:
+    """Execute one canonical S1 run and return its final summary path."""
+
+    script_started = time.perf_counter()
+    started_at = utc_now()
+
+    parse_started = time.perf_counter()
+    specification_path = Path(args.spec).expanduser().resolve()
+    specification, intent = _load_specification(specification_path)
+    _validate_arguments(args, intent)
+    parse_ms = (time.perf_counter() - parse_started) * 1000.0
+
+    provenance = RepositoryProvenance.capture(ROOT)
+    _require_canonical_provenance(provenance)
+    execution_id = args.execution_id or generate_execution_id(SCENARIO_ID)
+    identity = ExperimentIdentity(
+        scenario_id=SCENARIO_ID,
+        execution_id=execution_id,
+        profile_id=args.profile_id,
+        mode=args.mode,
+        backend_mode=args.backend,
+        repetition=args.repetition,
+    )
+    run_directory = ExperimentRunDirectory.create(
+        Path(args.results_root),
+        identity,
+    )
+    artifacts = _artifact_paths(run_directory)
+    configuration = _configuration(args=args, intent=intent)
+    manifest = build_run_manifest(
+        identity=identity,
+        provenance=provenance,
+        specification_path=specification_path,
+        configuration=configuration,
+        started_at=started_at,
+    )
+    atomic_write_json(artifacts["manifest"], manifest)
+
+    summary: Dict[str, Any] = {
+        "contract_version": manifest["contract_version"],
+        "identity": identity.to_dict(),
+        "run_status": "running",
+        "started_at_utc": utc_rfc3339(started_at),
+        "completed_at_utc": None,
+        "manifest": {
+            "path": str(artifacts["manifest"]),
+            "sha256": sha256_file(artifacts["manifest"]),
+        },
+        "specification": specification,
+        "intent": asdict(intent),
+        "configuration": configuration,
+        "causal_scope": configuration["causal_scope"],
+        "gates": {
+            "repository_provenance": True,
+            "preflight": False,
+            "linux_environment_readback": False,
+            "linux_overlay_readback": args.mode == "baseline",
+            "netconf_apply_readback": args.mode == "baseline",
+            "p4runtime_apply_readback": args.mode == "baseline",
+            "data_plane_exit_codes": False,
+            "measurement_complete": False,
+            "simultaneous_window": False,
+        },
         "timing": {
-            "t_wall_start_utc": wall_start_iso,
-            "t_wall_end_utc": None,
-            "duration_ms": None,
+            "preparation_ms": None,
             "control_plane_ms": {
                 "total": None,
-                "parse_ms": round(parse_ms, 3),
-                "domains": {"A": 0.0, "B": 0.0, "C": 0.0},
+                "linux_environment": None,
+                "linux_overlay": 0.0,
+                "netconf": 0.0,
+                "p4runtime": 0.0,
             },
+            "data_plane_ms": None,
+            "script_total_ms": None,
+            "specification_parse_ms": round(parse_ms, 3),
         },
         "artifacts": {
-            "domA_json": str(domA),
-            "domB_json": str(domB),
-            "domC_json": str(domC),
-            "tc_dump_A_txt": str(tc_dump_A),
-            "netconf_dump_B_txt": str(netconf_dump_B),
-            "p4_dump_C_txt": str(p4_dump_C),
-            "preflight_flow": str(pre_flow),
-            "preflight_be": str(pre_be),
-            "iperf_flow": str(ipf_flow),
-            "iperf_be": str(ipf_be),
-            "rtt_flow_csv": str(rtt_flow_csv),
-            "summary_json": str(summary),
+            key: str(path)
+            for key, path in artifacts.items()
         },
     }
 
-    # --- preflight ---
     try:
-        out = run(["ping", "-n", "-c", "3", ip_flow_dst], ns=ns_src, check=False, capture=True) or ""
-        pre_flow.write_text(out)
-    except Exception as e:
-        pre_flow.write_text(f"[preflight_error] {e}")
-    try:
-        out = run(["ping", "-n", "-c", "3", ip_be_dst], ns=ns_src, check=False, capture=True) or ""
-        pre_be.write_text(out)
-    except Exception as e:
-        pre_be.write_text(f"[preflight_error] {e}")
-
-    # --- Domain A (tc) ---
-    domA_info = {
-        "backend": "linux_tc_local",
-        "applied": False,
-        "env_params": {"bwA_mbps": args.bwA},
-        "intent_seen": intent,
-        "commands": [],
-        "readback": {},
-    }
-
-    tA0 = time.perf_counter()
-    # Em S1, tc é parte do AMBIENTE: aplicamos tanto em baseline quanto em adapt para garantir
-    # que o testbed reflita bwA_mbps, sem confundir com "adaptação" (que é B/C).
-    try:
-        if A_mod is None:
-            raise RuntimeError("Domain A backend was not provided by router")
-        evA = _apply_domain_a_backend(
-            A_mod,
-            rate_mbps=args.bwA,
-            ns=ns_src,
-            dev=f"{ns_src}-eth0",
+        preflight_started = time.perf_counter()
+        preflight_sensitive = _run_preflight(
+            source_namespace=SENSITIVE_SOURCE_NS,
+            destination_ip=DESTINATION_IP,
+            artifact=artifacts["preflight_sensitive"],
         )
-        domA_info["applied"] = True
-        domA_info["commands"] = evA["commands"]
-        domA_info["readback"] = evA["readback"]
-        domA_info["backend_details"] = evA.get("backend_details")
-        tc_dump_A.write_text(
-            "### tc qdisc\n" + (evA["readback"].get("qdisc") or "") +
-            "\n\n### tc class\n" + (evA["readback"].get("class") or "") +
-            "\n\n### tc filter\n" + (evA["readback"].get("filter") or "") + "\n"
+        preflight_best_effort = _run_preflight(
+            source_namespace=BEST_EFFORT_SOURCE_NS,
+            destination_ip=DESTINATION_IP,
+            artifact=artifacts["preflight_best_effort"],
         )
-    except Exception as e:
-        domA_info["error"] = str(e)
-        tc_dump_A.write_text(f"[error] {e}\n")
-    tA_ms = (time.perf_counter() - tA0) * 1000.0
-    s1["timing"]["control_plane_ms"]["domains"]["A"] = round(tA_ms, 3)
+        summary["preflight"] = {
+            "sensitive": preflight_sensitive,
+            "best_effort": preflight_best_effort,
+        }
+        summary["gates"]["preflight"] = True
+        summary["timing"]["preparation_ms"] = round(
+            (time.perf_counter() - preflight_started) * 1000.0
+            + parse_ms,
+            3,
+        )
 
-    safe_dump_json(domA, domA_info)
-    s1["backend_apply"]["A"] = bool(domA_info.get("applied"))
+        control_started = time.perf_counter()
+        backends = get_backends(args.backend)
+        linux_module = backends.get("A")
+        if linux_module is None:
+            raise S1ExecutionError("backend router did not provide domain A")
+        capacities = {
+            "A": float(args.bwA),
+            "B": float(args.bwB),
+            "C": float(args.bwC),
+        }
+        environment, environment_ms = _setup_linux_environment(
+            module=linux_module,
+            capacities=capacities,
+            delay_ms=float(args.delay_ms),
+            protected_minimum_mbps=intent.bandwidth_min_mbps,
+        )
+        summary["gates"]["linux_environment_readback"] = True
 
-    # --- Domain B (NETCONF) ---
-    domB_info = {
-        "backend_chain": [getattr(m, "__name__", str(m)) for m in (B_mods if isinstance(B_mods, (list, tuple)) else [B_mods])],
-        "applied": False,
-        "env_params": {"bwB_mbps": args.bwB},
-        "target": _mask_secret(target_B or {}) if target_B else None,
-        "responses": [],
-    }
+        overlay: Optional[Dict[str, Any]] = None
+        overlay_ms = 0.0
+        realization_ceil: Optional[float] = None
+        if args.mode == "adapt":
+            overlay, overlay_ms, realization_ceil = _apply_sensitive_overlay(
+                module=linux_module,
+                intent=intent,
+                bottleneck_capacity_mbps=float(args.bwB),
+                delay_ms=float(args.delay_ms),
+            )
+            summary["gates"]["linux_overlay_readback"] = True
 
-    tB_ms = 0.0
-    if args.mode == "adapt":
-        tB0 = time.perf_counter()
-        aggB = _apply_backend_chain(B_mods, domain_ctx={"name": "B"}, intent={"class": "prio10", "min_mbps": bw_min, "max_mbps": bw_max}, target=target_B)
-        domB_info.update(aggB)
-        tB_ms = (time.perf_counter() - tB0) * 1000.0
+        domain_a = {
+            "backend": "linux_tc_local",
+            "applied": True,
+            "environment": environment,
+            "intent_overlay": overlay,
+            "intent_overlay_applied": overlay is not None,
+            "realization_ceil_mbps": realization_ceil,
+            "measured_bottleneck_interface": BOTTLENECK_INTERFACE,
+        }
+        atomic_write_json(artifacts["domain_a"], domain_a)
+        atomic_write_text(
+            artifacts["tc_readback"],
+            _format_tc_dump(
+                environment=environment,
+                overlay=overlay,
+            ),
+        )
 
-        dumped = False
-        for r in domB_info.get("responses", []):
-            info = r.get("response")
-            if isinstance(info, dict) and info.get("running_snapshot"):
-                netconf_dump_B.write_text(str(info.get("running_snapshot")))
-                dumped = True
-                break
-        if not dumped:
-            netconf_dump_B.write_text("[no_dump] backend returned empty running_snapshot\n")
-    else:
-        netconf_dump_B.write_text("[baseline] no netconf changes applied\n")
+        real_targets = (
+            _load_real_targets()
+            if args.backend == "real"
+            else {}
+        )
+        target_b = (
+            (real_targets.get("B") or {}).get("target")
+            if args.backend == "real"
+            else None
+        )
+        target_c = (
+            (real_targets.get("C") or {}).get("target")
+            if args.backend == "real"
+            else None
+        )
+        if isinstance(target_c, dict):
+            target_c = dict(target_c)
+            target_c["dst_ip"] = DESTINATION_IP
 
-    s1["timing"]["control_plane_ms"]["domains"]["B"] = round(tB_ms, 3)
-    safe_dump_json(domB, domB_info)
-    s1["backend_apply"]["B"] = bool(domB_info.get("applied", False))
+        backend_apply = {
+            "A_environment": True,
+            "A_intent_overlay": overlay is not None,
+            "B": False,
+            "C": False,
+        }
+        if args.mode == "adapt":
+            control_intent = intent.to_backend_intent()
 
-    # --- Domain C (P4Runtime) ---
-    domC_info = {
-        "backend_chain": [getattr(m, "__name__", str(m)) for m in (C_mods if isinstance(C_mods, (list, tuple)) else [C_mods])],
-        "applied": False,
-        "env_params": {"bwC_mbps": args.bwC},
-        "target": _mask_secret(target_C or {}) if target_C else None,
-        "readback_dump": None,
-        "responses": [],
-    }
+            b_started = time.perf_counter()
+            domain_b = _apply_backend_chain(
+                backends.get("B"),
+                domain_name="B",
+                intent=control_intent,
+                target=target_b,
+            )
+            b_ms = (time.perf_counter() - b_started) * 1000.0
+            b_ok, b_readback, b_message = _gate_control_domain(
+                domain="B",
+                backend_mode=args.backend,
+                result=domain_b,
+                intent=intent,
+            )
+            domain_b.update(
+                {
+                    "target": _mask_secret(target_b),
+                    "gate_message": b_message,
+                    "data_plane_role": "materialization-and-readback-only",
+                }
+            )
+            atomic_write_json(artifacts["domain_b"], domain_b)
+            atomic_write_text(artifacts["netconf_readback"], b_readback)
+            if not b_ok:
+                raise S1ExecutionError(b_message)
+            summary["gates"]["netconf_apply_readback"] = True
+            backend_apply["B"] = True
 
-    tC_ms = 0.0
-    if args.mode == "adapt":
-        tC0 = time.perf_counter()
-        aggC = _apply_backend_chain(C_mods, domain_ctx={"name": "C"}, intent={"class": "prio10", "min_mbps": bw_min, "max_mbps": bw_max}, target=target_C)
-        domC_info.update(aggC)
-        tC_ms = (time.perf_counter() - tC0) * 1000.0
-
-        dump_txt = None
-        for r in domC_info.get("responses", []):
-            info = r.get("response")
-            if isinstance(info, dict) and info.get("readback_dump"):
-                dump_txt = info.get("readback_dump")
-                break
-        if dump_txt:
-            domC_info["readback_dump"] = "[embedded]"
-            p4_dump_C.write_text(str(dump_txt))
+            c_started = time.perf_counter()
+            domain_c = _apply_backend_chain(
+                backends.get("C"),
+                domain_name="C",
+                intent=control_intent,
+                target=target_c,
+            )
+            c_ms = (time.perf_counter() - c_started) * 1000.0
+            c_ok, c_readback, c_message = _gate_control_domain(
+                domain="C",
+                backend_mode=args.backend,
+                result=domain_c,
+                intent=intent,
+            )
+            domain_c.update(
+                {
+                    "target": _mask_secret(target_c),
+                    "gate_message": c_message,
+                    "data_plane_role": "materialization-and-readback-only",
+                }
+            )
+            atomic_write_json(artifacts["domain_c"], domain_c)
+            atomic_write_text(artifacts["p4_readback"], c_readback)
+            if not c_ok:
+                raise S1ExecutionError(c_message)
+            summary["gates"]["p4runtime_apply_readback"] = True
+            backend_apply["C"] = True
         else:
-            domC_info["readback_dump"] = "[no_dump]"
-            p4_dump_C.write_text("[no_dump] backend returned empty readback_dump\n")
-    else:
-        p4_dump_C.write_text("[baseline] no p4 changes applied\n")
+            b_ms = 0.0
+            c_ms = 0.0
+            domain_b = {
+                "applied": False,
+                "not_applied_reason": "baseline",
+                "data_plane_role": "materialization-and-readback-only",
+            }
+            domain_c = {
+                "applied": False,
+                "not_applied_reason": "baseline",
+                "data_plane_role": "materialization-and-readback-only",
+            }
+            atomic_write_json(artifacts["domain_b"], domain_b)
+            atomic_write_json(artifacts["domain_c"], domain_c)
+            atomic_write_text(
+                artifacts["netconf_readback"],
+                "[baseline] NETCONF materialization was intentionally skipped.\n",
+            )
+            atomic_write_text(
+                artifacts["p4_readback"],
+                "[baseline] P4Runtime materialization was intentionally skipped.\n",
+            )
 
-    s1["timing"]["control_plane_ms"]["domains"]["C"] = round(tC_ms, 3)
-    safe_dump_json(domC, domC_info)
-    s1["backend_apply"]["C"] = bool(domC_info.get("applied", False))
+        control_ms = (time.perf_counter() - control_started) * 1000.0
+        summary["backend_apply"] = backend_apply
+        summary["timing"]["control_plane_ms"] = {
+            "total": round(control_ms, 3),
+            "linux_environment": round(environment_ms, 3),
+            "linux_overlay": round(overlay_ms, 3),
+            "netconf": round(b_ms, 3),
+            "p4runtime": round(c_ms, 3),
+        }
 
-    # --- Traffic: flow + BE (ports separados) ---
-    # Flow: limitado pelo intent (bw_max) como carga oferecida (evita falso "não conforme" por oversubscription do gerador)
-    flow_offered = max(0.1, min(bw_max, args.bwA, args.bwB, args.bwC))
-    run_iperf3_unicast(args.duration, flow_offered, ipf_flow, ns_cli=ns_src, ns_srv=ns_flow_dst, srv_ip=ip_flow_dst, port=5201)
-    run_iperf3_unicast(args.duration, args.be_mbps, ipf_be, ns_cli=ns_src, ns_srv=ns_be_dst, srv_ip=ip_be_dst, port=5202)
+        data_started = time.perf_counter()
+        data_plane = _run_data_plane(
+            duration_s=args.duration,
+            flow_mbps=float(args.flow_mbps),
+            best_effort_mbps=float(args.be_mbps),
+            rtt_interval_ms=args.rtt_interval_ms,
+            rtt_samples=args.rtt_samples,
+            artifacts=artifacts,
+        )
+        data_ms = (time.perf_counter() - data_started) * 1000.0
+        summary["timing"]["data_plane_ms"] = round(data_ms, 3)
+        summary["data_plane"] = data_plane
+        summary["gates"]["data_plane_exit_codes"] = all(
+            status == 0
+            for status in data_plane["exit_codes"].values()
+        )
+        summary["gates"]["measurement_complete"] = bool(
+            data_plane["rtt"]["complete"]
+        )
+        summary["gates"]["simultaneous_window"] = bool(
+            data_plane["observed_windows"]["complete"]
+        )
 
-    # RTT do flow (h1 -> h3)
-    ok, reqn = collect_rtt_samples(ns=ns_src, dst_ip=ip_flow_dst, samples=args.rtt_samples, interval_ms=args.rtt_interval_ms, out_csv=rtt_flow_csv)
-    rtt_val, rtt_n = rtt_percentile_ms(rtt_flow_csv, rtt_p)
+        rtt_key = intent.latency_percentile.lower()
+        observed_rtt = float(data_plane["rtt"]["rtt_ms"][rtt_key])
+        sensitive_throughput = float(
+            data_plane["sensitive"]["throughput_mbps"]
+        )
+        tolerance = float(args.bandwidth_tolerance_mbps)
+        latency_ok = observed_rtt <= intent.latency_max_ms
+        bandwidth_min_ok = (
+            sensitive_throughput + tolerance
+            >= intent.bandwidth_min_mbps
+        )
+        bandwidth_max_ok = (
+            True
+            if intent.bandwidth_max_mbps is None
+            else sensitive_throughput
+            <= intent.bandwidth_max_mbps + tolerance
+        )
+        bandwidth_ok = bandwidth_min_ok and bandwidth_max_ok
+        all_measurement_gates = all(
+            summary["gates"][key]
+            for key in (
+                "data_plane_exit_codes",
+                "measurement_complete",
+                "simultaneous_window",
+            )
+        )
 
-    flow_thr = parse_iperf3_mbps(ipf_flow)
-    be_thr = parse_iperf3_mbps(ipf_be)
+        summary["metrics"] = {
+            "rtt_percentile": intent.latency_percentile,
+            "rtt_percentile_ms": observed_rtt,
+            "rtt_ms": data_plane["rtt"]["rtt_ms"],
+            "rtt_samples": data_plane["rtt"]["parsed_samples"],
+            "delivery_ratio": data_plane["rtt"]["delivery_ratio"],
+            "sensitive_throughput_mbps": sensitive_throughput,
+            "best_effort_throughput_mbps": float(
+                data_plane["best_effort"]["throughput_mbps"]
+            ),
+            "simultaneous_overlap_s": data_plane[
+                "observed_windows"
+            ]["simultaneous_overlap_s"],
+        }
+        summary["conformance"] = {
+            "measurement_valid": all_measurement_gates,
+            "latency_ok": latency_ok,
+            "bandwidth_min_ok": bandwidth_min_ok,
+            "bandwidth_max_declared": (
+                intent.bandwidth_max_mbps is not None
+            ),
+            "bandwidth_max_ok": bandwidth_max_ok,
+            "bandwidth_ok": bandwidth_ok,
+            "intent_ok": (
+                all_measurement_gates
+                and latency_ok
+                and bandwidth_ok
+            ),
+            "bandwidth_tolerance_mbps": tolerance,
+        }
+        summary["run_status"] = "completed"
+        summary["completed_at_utc"] = utc_rfc3339()
+        summary["timing"]["script_total_ms"] = round(
+            (time.perf_counter() - script_started) * 1000.0,
+            3,
+        )
+        atomic_write_json(artifacts["summary"], summary)
+        _write_artifact_hashes(artifacts=artifacts)
+        return artifacts["summary"]
+    except BaseException as exc:
+        summary["run_status"] = "failed"
+        summary["completed_at_utc"] = utc_rfc3339()
+        summary["timing"]["script_total_ms"] = round(
+            (time.perf_counter() - script_started) * 1000.0,
+            3,
+        )
+        summary["failure"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+        atomic_write_json(artifacts["summary"], summary)
+        _write_artifact_hashes(artifacts=artifacts)
+        raise S1ExecutionError(
+            f"{exc}; failure summary: {artifacts['summary']}"
+        ) from exc
 
-    s1["metrics"] = {
-        "rtt_pctl": rtt_pctl,
-        "rtt_pctl_ms": rtt_val,
-        "rtt_n": rtt_n,
-        "delivery_ratio": round(ok / reqn, 3) if reqn else 0.0,
-        "flow_throughput_mbps": flow_thr,
-        "be_throughput_mbps": be_thr,
-    }
 
-    latency_ok = (rtt_val <= latency_max_ms) if latency_max_ms > 0 else True
-    bandwidth_ok = (flow_thr is not None and bw_max > 0 and flow_thr <= bw_max)
-    intent_ok = bool(latency_ok and bandwidth_ok)
+def main() -> int:
+    """CLI wrapper with stable success/failure markers."""
 
-    s1["conformance"] = {
-        "latency_ok": bool(latency_ok),
-        "bandwidth_ok": bool(bandwidth_ok),
-        "intent_ok": bool(intent_ok),
-    }
+    args = _build_parser().parse_args()
+    try:
+        summary_path = execute(args)
+    except BaseException as exc:
+        print("PHASE19_S1_RUN_OK=False")
+        print(f"PHASE19_S1_FAILURE={type(exc).__name__}: {exc}")
+        return 1
 
-    # --- timing finalize ---
-    cp_total_ms = (time.perf_counter() - t_cp0) * 1000.0
-    s1["timing"]["control_plane_ms"]["total"] = round(cp_total_ms, 3)
-    s1["timing"]["t_wall_end_utc"] = utc_iso()
-    s1["timing"]["duration_ms"] = int((time.time() - t_wall0) * 1000)
+    document = json.loads(summary_path.read_text(encoding="utf-8"))
+    print(f"PHASE19_S1_EXECUTION_ID={document['identity']['execution_id']}")
+    print(f"PHASE19_S1_SUMMARY={summary_path}")
+    print("PHASE19_S1_RUN_OK=True")
+    return 0
 
-    safe_dump_json(summary, s1)
-    print(json.dumps(s1, ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

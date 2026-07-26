@@ -309,6 +309,23 @@ def _nonnegative_number(value: Any, label: str) -> float:
     return number
 
 
+def _htb_priority(value: Any, label: str) -> int:
+    """Validate one Linux HTB priority value.
+
+    Linux HTB accepts priorities from 0 (highest) through 7 (lowest).  The
+    helper is intentionally separate from ``_minor`` because a class identifier
+    is only an identifier; it does not define scheduler precedence.
+    """
+
+    try:
+        priority = int(value)
+    except (TypeError, ValueError) as exc:
+        raise LinuxTCError(f"{label} must be an integer, got {value!r}") from exc
+    if not 0 <= priority <= 7:
+        raise LinuxTCError(f"{label} must be between 0 and 7, got {priority}")
+    return priority
+
+
 def _number_token(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
@@ -544,6 +561,49 @@ def setup_environment(
         parent_minor = _DEFAULT_PARENT_MINOR
         parent_class = _classid(parent_minor, root_major)
         default_class = _classid(default_minor, root_major)
+        default_priority_raw = _first(
+            environment,
+            ("default_priority", "default_htb_priority"),
+            _first(
+                resolved.raw,
+                ("default_priority", "default_htb_priority"),
+            ),
+        )
+        default_priority = (
+            _htb_priority(
+                default_priority_raw,
+                "environment.default_priority",
+            )
+            if default_priority_raw is not None
+            else None
+        )
+        default_rate_raw = _first(
+            environment,
+            ("default_rate_mbps",),
+            _first(resolved.raw, ("default_rate_mbps",), capacity),
+        )
+        default_ceil_raw = _first(
+            environment,
+            ("default_ceil_mbps",),
+            _first(resolved.raw, ("default_ceil_mbps",), capacity),
+        )
+        default_rate = _positive_number(
+            default_rate_raw,
+            "environment.default_rate_mbps",
+        )
+        default_ceil = _positive_number(
+            default_ceil_raw,
+            "environment.default_ceil_mbps",
+        )
+        if default_rate > default_ceil:
+            raise LinuxTCError(
+                "environment.default_rate_mbps must not exceed "
+                "default_ceil_mbps"
+            )
+        if default_ceil > capacity:
+            raise LinuxTCError(
+                "environment.default_ceil_mbps must not exceed link capacity"
+            )
 
         runner.run(
             ["tc", "qdisc", "del", "dev", resolved.device, "root"],
@@ -570,11 +630,14 @@ def setup_environment(
         ])
 
         if create_default:
-            runner.run([
+            default_class_command = [
                 "tc", "class", "add", "dev", resolved.device,
                 "parent", parent_class, "classid", default_class, "htb",
-                "rate", _mbit(capacity), "ceil", _mbit(capacity),
-            ])
+                "rate", _mbit(default_rate), "ceil", _mbit(default_ceil),
+            ]
+            if default_priority is not None:
+                default_class_command.extend(["prio", str(default_priority)])
+            runner.run(default_class_command)
             if attach_netem and delay_ms is not None:
                 runner.run([
                     "tc", "qdisc", "add", "dev", resolved.device,
@@ -616,6 +679,9 @@ def setup_environment(
                 "delay_ms": delay_ms,
                 "create_default_class": create_default,
                 "default_classid": default_class if create_default else None,
+                "default_priority": default_priority,
+                "default_rate_mbps": default_rate,
+                "default_ceil_mbps": default_ceil,
             },
             "planned": _planned(
                 "setup_environment",
@@ -713,6 +779,106 @@ def _filter_command(
     return command
 
 
+def _resolve_classifiers(
+    *,
+    intent: Mapping[str, Any],
+    target: ResolvedTarget,
+) -> List[JsonDict]:
+    """Normalize one or more selectors that map traffic to an HTB class.
+
+    Historical callers provide one selector through top-level target fields.
+    Canonical scenarios may provide ``target.classifiers`` to classify all
+    traffic used to observe one requirement.  S1 uses this capability to place
+    both the sensitive TCP flow and its ICMP latency probes in the same class.
+    """
+
+    raw_classifiers = target.raw.get("classifiers")
+    if raw_classifiers is None:
+        raw_items: List[Mapping[str, Any]] = [target.raw]
+    else:
+        if (
+            not isinstance(raw_classifiers, Sequence)
+            or isinstance(raw_classifiers, (str, bytes))
+            or not raw_classifiers
+        ):
+            raise LinuxTCError(
+                "target.classifiers must be a non-empty sequence of mappings"
+            )
+        if not all(isinstance(item, Mapping) for item in raw_classifiers):
+            raise LinuxTCError(
+                "every target.classifiers item must be a mapping"
+            )
+        raw_items = list(raw_classifiers)
+
+    classifiers: List[JsonDict] = []
+    priorities: set[int] = set()
+    for index, raw in enumerate(raw_items):
+        protocol = str(
+            _first(
+                raw,
+                ("filter_protocol", "protocol"),
+                _first(intent, ("filter_protocol", "protocol"), "tcp"),
+            )
+        ).strip().lower()
+        if protocol not in _PROTOCOL_NUMBERS:
+            raise LinuxTCError(
+                f"unsupported classifier protocol {protocol!r}; "
+                "use tcp, udp or icmp"
+            )
+
+        default_priority = _DEFAULT_FILTER_PRIORITY + index
+        priority_raw = _first(
+            raw,
+            ("filter_priority", "filter_prio"),
+            default_priority,
+        )
+        try:
+            filter_priority = int(priority_raw)
+        except (TypeError, ValueError) as exc:
+            raise LinuxTCError(
+                f"invalid classifier priority: {priority_raw!r}"
+            ) from exc
+        if filter_priority <= 0:
+            raise LinuxTCError(
+                "classifier priority must be greater than zero"
+            )
+        if filter_priority in priorities:
+            raise LinuxTCError(
+                f"duplicate classifier priority: {filter_priority}"
+            )
+        priorities.add(filter_priority)
+
+        port_raw = _first(
+            raw,
+            ("dst_port", "be_port", "port"),
+            _first(intent, ("dst_port", "be_port", "port"), _DEFAULT_DST_PORT),
+        )
+        dst_port: Optional[int] = None
+        if protocol in {"tcp", "udp"}:
+            try:
+                dst_port = int(port_raw)
+            except (TypeError, ValueError) as exc:
+                raise LinuxTCError(
+                    f"invalid classifier destination port: {port_raw!r}"
+                ) from exc
+            if not 1 <= dst_port <= 65535:
+                raise LinuxTCError(
+                    f"classifier destination port out of range: {dst_port}"
+                )
+
+        dst_ip_raw = _first(raw, ("dst_ip",), intent.get("dst_ip"))
+        dst_ip = str(dst_ip_raw).strip() if dst_ip_raw else None
+        classifiers.append(
+            {
+                "protocol": protocol,
+                "filter_priority": filter_priority,
+                "dst_port": dst_port,
+                "dst_ip": dst_ip,
+            }
+        )
+    return classifiers
+
+
 def apply_qos(
     domain: Any,
     intent: Mapping[str, Any],
@@ -739,43 +905,16 @@ def apply_qos(
             default=_DEFAULT_BEST_EFFORT_MINOR,
         )
 
-        protocol = str(
-            _first(resolved.raw, ("filter_protocol", "protocol"),
-                   _first(intent, ("filter_protocol", "protocol"), "tcp"))
-        ).strip().lower()
-        if protocol not in _PROTOCOL_NUMBERS:
-            raise LinuxTCError(
-                f"unsupported filter protocol {protocol!r}; use tcp, udp or icmp"
-            )
-
-        port_raw = _first(
+        classifiers = _resolve_classifiers(intent=intent, target=resolved)
+        htb_priority_raw = _first(
             resolved.raw,
-            ("dst_port", "be_port", "port"),
-            _first(intent, ("dst_port", "be_port", "port"), _DEFAULT_DST_PORT),
+            ("htb_priority", "scheduler_priority"),
         )
-        dst_port: Optional[int] = None
-        if protocol in {"tcp", "udp"}:
-            try:
-                dst_port = int(port_raw)
-            except (TypeError, ValueError) as exc:
-                raise LinuxTCError(f"invalid destination port: {port_raw!r}") from exc
-            if not 1 <= dst_port <= 65535:
-                raise LinuxTCError(f"destination port out of range: {dst_port}")
-
-        dst_ip_raw = _first(resolved.raw, ("dst_ip",), intent.get("dst_ip"))
-        dst_ip = str(dst_ip_raw).strip() if dst_ip_raw else None
-
-        filter_priority_raw = _first(
-            resolved.raw,
-            ("filter_priority", "filter_prio"),
-            _DEFAULT_FILTER_PRIORITY,
+        htb_priority = (
+            _htb_priority(htb_priority_raw, "target.htb_priority")
+            if htb_priority_raw is not None
+            else None
         )
-        try:
-            filter_priority = int(filter_priority_raw)
-        except (TypeError, ValueError) as exc:
-            raise LinuxTCError(f"invalid filter priority: {filter_priority_raw!r}") from exc
-        if filter_priority <= 0:
-            raise LinuxTCError("filter priority must be greater than zero")
 
         delay_raw = _first(resolved.raw, ("priority_delay_ms", "delay_ms"))
         delay_ms = (
@@ -798,10 +937,12 @@ def apply_qos(
                 )
 
         if idempotent_cleanup:
-            runner.run([
-                "tc", "filter", "del", "dev", resolved.device,
-                "parent", "1:", "protocol", "ip", "prio", str(filter_priority),
-            ], check=False, ignore_failure=True)
+            for classifier in classifiers:
+                runner.run([
+                    "tc", "filter", "del", "dev", resolved.device,
+                    "parent", "1:", "protocol", "ip", "prio",
+                    str(classifier["filter_priority"]),
+                ], check=False, ignore_failure=True)
             if class_minor != default_minor or _as_bool(resolved.raw.get("allow_default_class_replace"), False):
                 if remove_leaf_qdisc:
                     runner.run([
@@ -814,17 +955,20 @@ def apply_qos(
                 ], check=False, ignore_failure=True)
 
         if class_minor == default_minor:
-            runner.run([
+            class_command = [
                 "tc", "class", "replace", "dev", resolved.device,
                 "parent", "1:1", "classid", class_id, "htb",
                 "rate", _mbit(minimum), "ceil", _mbit(maximum),
-            ])
+            ]
         else:
-            runner.run([
+            class_command = [
                 "tc", "class", "add", "dev", resolved.device,
                 "parent", "1:1", "classid", class_id, "htb",
                 "rate", _mbit(minimum), "ceil", _mbit(maximum),
-            ])
+            ]
+        if htb_priority is not None:
+            class_command.extend(["prio", str(htb_priority)])
+        runner.run(class_command)
 
         if attach_netem and delay_ms is not None:
             runner.run([
@@ -833,20 +977,22 @@ def apply_qos(
                 "netem", "delay", _milliseconds(delay_ms),
             ], check=False, ignore_failure=True)
 
-        runner.run(_filter_command(
-            device=resolved.device,
-            classid=class_id,
-            protocol=protocol,
-            filter_priority=filter_priority,
-            dst_port=dst_port,
-            dst_ip=dst_ip,
-        ))
+        for classifier in classifiers:
+            runner.run(_filter_command(
+                device=resolved.device,
+                classid=class_id,
+                protocol=str(classifier["protocol"]),
+                filter_priority=int(classifier["filter_priority"]),
+                dst_port=classifier.get("dst_port"),
+                dst_ip=classifier.get("dst_ip"),
+            ))
 
         readback = _readback(runner, resolved.device)
         if resolved.dry_run:
             checks = {
                 "priority_class": True,
                 "priority_filter": True,
+                "priority_filters": True,
                 "priority_netem": True,
             }
             ok = True
@@ -857,6 +1003,7 @@ def apply_qos(
             checks = {
                 "priority_class": class_id in classes,
                 "priority_filter": class_id in filters,
+                "priority_filters": filters.count(class_id) >= len(classifiers),
                 "priority_netem": (
                     f"netem {class_minor}:" in qdisc
                     if attach_netem and delay_ms is not None
@@ -875,16 +1022,14 @@ def apply_qos(
                 "classid": class_id,
                 "min_mbps": minimum,
                 "max_mbps": maximum,
-                "protocol": protocol,
-                "dst_port": dst_port,
-                "dst_ip": dst_ip,
+                "htb_priority": htb_priority,
+                "classifiers": classifiers,
             },
             "planned": _planned(
                 "apply_qos",
                 runner,
                 classid=class_id,
-                filter_protocol=protocol,
-                filter_priority=filter_priority,
+                classifiers=classifiers,
             ),
             "exec": _command_payload(runner),
             "readback": readback,

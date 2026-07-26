@@ -144,7 +144,14 @@ def _run_git(repository: Path, arguments: Sequence[str]) -> str:
     """Run one read-only Git command and return trimmed stdout."""
 
     completed = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+            *arguments,
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -177,7 +184,15 @@ class RepositoryProvenance:
 
         origin_commit: str | None
         completed = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "origin/develop"],
+            [
+                "git",
+                "-c",
+                f"safe.directory={root}",
+                "-C",
+                str(root),
+                "rev-parse",
+                "origin/develop",
+            ],
             check=False,
             capture_output=True,
             text=True,

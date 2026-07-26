@@ -92,9 +92,13 @@ def _build_qos_xml(intent: Dict[str, Any]) -> str:
     if max_mbps is not None:
         parts.append(f"<max-mbps>{max_mbps}</max-mbps>")
 
+    # Replace the modeled QoS container instead of merging only present leaves.
+    # This preserves the semantic difference between an absent max_mbps bound
+    # and a stale maximum left by a previous execution.
     return f"""
-<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-  <qos xmlns="urn:l2i:qos">
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"
+        xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <qos xmlns="urn:l2i:qos" nc:operation="replace">
     {''.join(parts)}
   </qos>
 </config>

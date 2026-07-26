@@ -276,6 +276,7 @@ def apply_qos(domain: Any, intent: Dict[str, Any], target: Optional[Dict[str, An
         },
         "installed_rule": None,
         "readback_dump": None,
+        "readback_verified": False,
     }
 
     client = P4RTClient(
@@ -440,6 +441,7 @@ def apply_qos(domain: Any, intent: Dict[str, Any], target: Optional[Dict[str, An
         if found_expected:
             # Se o estado final é consistente, consideramos aplicado.
             # Se houve erro no RPC, registramos a divergência (isso vira evidência científica).
+            info["readback_verified"] = True
             if not info["exec"]["ok"]:
                 info["exec"]["write_error_but_verified"] = True
             info["exec"]["ok"] = True

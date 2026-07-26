@@ -1059,8 +1059,17 @@ run_s1_real() {
     "$REPO_DIR/scripts/s1_topology_setup.sh" \
     run_python_module_as_root scenarios.multidomain_s1 \
       --spec "$REPO_DIR/specs/valid/s1_unicast_qos.json" \
-      --duration "${S1_DURATION:-10}" \
-      --be-mbps "${S1_BE_MBPS:-30}" \
+      --duration "${S1_DURATION:-30}" \
+      --flow-mbps "${S1_FLOW_MBPS:-8}" \
+      --be-mbps "${S1_BE_MBPS:-60}" \
+      --bwA "${S1_BWA:-100}" \
+      --bwB "${S1_BWB:-50}" \
+      --bwC "${S1_BWC:-100}" \
+      --delay-ms "${S1_DELAY_MS:-1}" \
+      --rtt-interval-ms "${S1_RTT_INTERVAL_MS:-50}" \
+      --bandwidth-tolerance-mbps "${S1_BANDWIDTH_TOLERANCE_MBPS:-0.25}" \
+      --profile-id "${S1_PROFILE_ID:-s1-canonical-v1}" \
+      --repetition "${S1_REPETITION:-1}" \
       --mode "${S1_MODE:-adapt}" \
       --backend real
 }
@@ -1071,8 +1080,17 @@ run_s1_mock() {
     "$REPO_DIR/scripts/s1_topology_setup.sh" \
     run_python_module_as_root scenarios.multidomain_s1 \
       --spec "$REPO_DIR/specs/valid/s1_unicast_qos.json" \
-      --duration "${S1_DURATION:-10}" \
-      --be-mbps "${S1_BE_MBPS:-30}" \
+      --duration "${S1_DURATION:-30}" \
+      --flow-mbps "${S1_FLOW_MBPS:-8}" \
+      --be-mbps "${S1_BE_MBPS:-60}" \
+      --bwA "${S1_BWA:-100}" \
+      --bwB "${S1_BWB:-50}" \
+      --bwC "${S1_BWC:-100}" \
+      --delay-ms "${S1_DELAY_MS:-1}" \
+      --rtt-interval-ms "${S1_RTT_INTERVAL_MS:-50}" \
+      --bandwidth-tolerance-mbps "${S1_BANDWIDTH_TOLERANCE_MBPS:-0.25}" \
+      --profile-id "${S1_PROFILE_ID:-s1-canonical-v1}" \
+      --repetition "${S1_REPETITION:-1}" \
       --mode "${S1_MODE:-adapt}" \
       --backend mock
 }
@@ -1657,6 +1675,19 @@ validate_phase19_experiment_contract() {
     "$REPO_DIR/scripts/validate_phase19_experiment_contract.py"
 }
 
+validate_phase19_s1_static() {
+  require_repo_layout
+
+  # Validate the canonical S1 source, topology, optional-bound semantics, and
+  # dry-run Linux TC plans.  This action does not create namespaces, start
+  # services, invoke S1 traffic, or contact NETCONF/P4Runtime endpoints.
+  run env \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" \
+    "$REPO_DIR/scripts/validate_phase19_s1_static.py"
+}
+
 # -------------------------------
 # verificações rápidas
 # -------------------------------
@@ -1770,6 +1801,7 @@ Ações internas úteis:
   run_s2_multidomain_selective_assurance_foundation
   run_s2_multidomain_selective_assurance_validation
   validate_phase19_experiment_contract
+  validate_phase19_s1_static
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1838,6 +1870,7 @@ case "${1:-}" in
   run_s2_multidomain_selective_assurance_foundation) run_s2_multidomain_selective_assurance_foundation ;;
   run_s2_multidomain_selective_assurance_validation) run_s2_multidomain_selective_assurance_validation ;;
   validate_phase19_experiment_contract) validate_phase19_experiment_contract ;;
+  validate_phase19_s1_static) validate_phase19_s1_static ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
