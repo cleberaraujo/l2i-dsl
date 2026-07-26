@@ -1,0 +1,218 @@
+{
+  "analysis": {
+    "estimand": "within-pair adapt minus baseline",
+    "inference_unit": "paired execution",
+    "primary_metric": {
+      "field": "metrics.rtt_p99_ms",
+      "name": "rtt_p99_ms",
+      "preferred_direction": "negative"
+    },
+    "secondary_metrics": [
+      "metrics.delivery_ratio",
+      "metrics.sensitive_throughput_mbps",
+      "metrics.best_effort_throughput_mbps",
+      "conformance.intent_ok"
+    ],
+    "within_run_probe_pseudoreplication_prohibited": true
+  },
+  "campaign": {
+    "final": {
+      "backend": "real",
+      "duration_s": 30,
+      "early_stopping_prohibited": true,
+      "expanded_run_count": 180,
+      "expanded_schedule_sha256": "eb6af395c5134f94aece7636c9d5659ce5d158a62ad320332dbedd80fb1192af",
+      "mode_order_rule": {
+        "baseline_first_if": "(pair_index + profile_offset) % 2 == 0",
+        "profile_offsets": {
+          "light": 1,
+          "nominal": 2,
+          "severe": 3
+        }
+      },
+      "pair_count_per_profile": 30,
+      "prerequisites": [
+        "canonical_s2_implementation_certified",
+        "statistical_pipeline_certified",
+        "final_campaign_runner_certified"
+      ],
+      "profile_order_cycle": [
+        [
+          "light",
+          "nominal",
+          "severe"
+        ],
+        [
+          "nominal",
+          "severe",
+          "light"
+        ],
+        [
+          "severe",
+          "light",
+          "nominal"
+        ]
+      ],
+      "scientific_use": "included"
+    },
+    "foundation": {
+      "backend": "real",
+      "duration_s": 30,
+      "pair_count_per_profile": 2,
+      "run_count": 12,
+      "schedule": [
+        {
+          "mode_order": [
+            "baseline",
+            "adapt"
+          ],
+          "pair_id": "S1-FND-LIGHT-P01",
+          "profile_id": "light"
+        },
+        {
+          "mode_order": [
+            "adapt",
+            "baseline"
+          ],
+          "pair_id": "S1-FND-NOMINAL-P01",
+          "profile_id": "nominal"
+        },
+        {
+          "mode_order": [
+            "baseline",
+            "adapt"
+          ],
+          "pair_id": "S1-FND-SEVERE-P01",
+          "profile_id": "severe"
+        },
+        {
+          "mode_order": [
+            "baseline",
+            "adapt"
+          ],
+          "pair_id": "S1-FND-NOMINAL-P02",
+          "profile_id": "nominal"
+        },
+        {
+          "mode_order": [
+            "adapt",
+            "baseline"
+          ],
+          "pair_id": "S1-FND-SEVERE-P02",
+          "profile_id": "severe"
+        },
+        {
+          "mode_order": [
+            "adapt",
+            "baseline"
+          ],
+          "pair_id": "S1-FND-LIGHT-P02",
+          "profile_id": "light"
+        }
+      ],
+      "scientific_use": "excluded"
+    }
+  },
+  "causal_scope": {
+    "forwarding_path": "linux-bridge-veth",
+    "netconf": "materialization-and-readback-only",
+    "p4runtime": "materialization-and-readback-only",
+    "traffic_effect_backend": "linux-tc"
+  },
+  "contract_version": "phase19-s1-experiment-plan-v1",
+  "execution_policy": {
+    "invalid_attempt": {
+      "criteria": [
+        "repository_provenance_gate_failed",
+        "artifact_integrity_gate_failed",
+        "backend_apply_or_readback_gate_failed",
+        "data_plane_process_exit_gate_failed",
+        "measurement_completeness_gate_failed",
+        "simultaneous_window_gate_failed"
+      ],
+      "original_attempt_must_be_preserved": true,
+      "replacement_attempt_must_increment_attempt_number": true
+    },
+    "nonconforming_but_valid_attempt_must_be_retained": true,
+    "outcome_based_repetition_or_exclusion_prohibited": true,
+    "topology_recreated_for_every_execution": true,
+    "unique_run_slot_and_attempt_identity_required": true
+  },
+  "fixed_configuration": {
+    "bandwidth_tolerance_mbps": 0.25,
+    "best_effort_profiles": [
+      {
+        "best_effort_mbps": 45,
+        "bottleneck_excess_ratio": 0.06,
+        "offered_total_mbps": 53,
+        "profile_id": "light"
+      },
+      {
+        "best_effort_mbps": 60,
+        "bottleneck_excess_ratio": 0.36,
+        "offered_total_mbps": 68,
+        "profile_id": "nominal"
+      },
+      {
+        "best_effort_mbps": 90,
+        "bottleneck_excess_ratio": 0.96,
+        "offered_total_mbps": 98,
+        "profile_id": "severe"
+      }
+    ],
+    "capacities_mbps": {
+      "A": 100,
+      "B": 50,
+      "C": 100
+    },
+    "delay_ms_per_shaped_egress": 1,
+    "intent": {
+      "bandwidth_min_mbps": 4,
+      "delivery_min_ratio": 0.99,
+      "latency_max_ms": 30,
+      "latency_percentile": "P99"
+    },
+    "rtt_interval_ms": 50,
+    "sensitive_offered_mbps": 8
+  },
+  "preflight": {
+    "dynamic_mock": {
+      "approved": true,
+      "backend": "mock",
+      "report_sha256": "058848fcabcde03da15ffc2a4e4700f92b25bc0826e2d66d67bcb1734ec7386d",
+      "scientific_use": "excluded"
+    },
+    "dynamic_real": {
+      "backend": "real",
+      "best_effort_profile": "nominal",
+      "duration_s": 3,
+      "mode_order": [
+        "baseline",
+        "adapt"
+      ],
+      "required_adapt_domains": [
+        "A_environment",
+        "A_intent_overlay",
+        "B",
+        "C"
+      ],
+      "scientific_use": "excluded",
+      "services_must_be_stopped_afterward": true
+    }
+  },
+  "preregistration": {
+    "design_base_commit": "ea524a2a6810d250dd9c60b9984b40b46ae3c248",
+    "observation_boundary": "before_first_real_backend_preflight",
+    "source_hashes": {
+      "docs/phase19_s1_canonical_design.md": "d1cf438eeb053937f6571245058605b906a6ac8129524b741d26f0a2a0ba0dbb",
+      "scenarios/multidomain_s1.py": "f21cb4cb5414ef8f8cbe6ca84e8eab8d330cd7562a557a859f6aaede86fb3835",
+      "specs/valid/s1_unicast_qos.json": "0dcbdbb0d702065396ee788343ccf366d8f94e8c34deaaf79ee546c02059b430"
+    },
+    "status": "frozen-before-real-observation"
+  },
+  "scenario": {
+    "entrypoint": "scenarios/multidomain_s1.py",
+    "scenario_id": "S1",
+    "specification": "specs/valid/s1_unicast_qos.json"
+  }
+}
