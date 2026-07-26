@@ -1645,6 +1645,15 @@ run_s2_p4_qos_contention_semantic_validation() {
     "$output_dir"
 }
 
+validate_phase19_experiment_contract() {
+  require_repo_layout
+
+  # Validate the shared execution identity and artifact persistence contract.
+  # This action is static and does not start services or execute S1/S2 traffic.
+  run "$PYTHON_BIN" \
+    "$REPO_DIR/scripts/validate_phase19_experiment_contract.py"
+}
+
 # -------------------------------
 # verificações rápidas
 # -------------------------------
@@ -1757,6 +1766,7 @@ Ações internas úteis:
   run_s2_multidomain_selective_assurance
   run_s2_multidomain_selective_assurance_foundation
   run_s2_multidomain_selective_assurance_validation
+  validate_phase19_experiment_contract
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1824,6 +1834,7 @@ case "${1:-}" in
   run_s2_multidomain_selective_assurance) run_s2_multidomain_selective_assurance ;;
   run_s2_multidomain_selective_assurance_foundation) run_s2_multidomain_selective_assurance_foundation ;;
   run_s2_multidomain_selective_assurance_validation) run_s2_multidomain_selective_assurance_validation ;;
+  validate_phase19_experiment_contract) validate_phase19_experiment_contract ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
