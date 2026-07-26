@@ -1597,6 +1597,18 @@ run_s2_multidomain_selective_assurance_foundation() {
 }
 
 
+run_s2_multidomain_selective_assurance_validation() {
+  require_repo_layout
+
+  # Run the mirrored twelve-condition Phase 18 validation matrix. Functional
+  # selectivity and bounded synthetic retry are enforced; timing remains
+  # observe-only because the Phase 17 timing profile is already certified.
+  run \
+    "$REPO_DIR/scripts/run_s2_multidomain_selective_assurance_validation.sh" \
+    "${PHASE18_VALIDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/multidomain-selective-assurance-validation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
+
 run_s2_p4_state_recovery_foundation() {
   require_repo_layout
 
@@ -1744,6 +1756,7 @@ Ações internas úteis:
   run_s2_multidomain_autonomous_assurance_final_timing_validation
   run_s2_multidomain_selective_assurance
   run_s2_multidomain_selective_assurance_foundation
+  run_s2_multidomain_selective_assurance_validation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1810,6 +1823,7 @@ case "${1:-}" in
   run_s2_multidomain_autonomous_assurance_final_timing_validation) run_s2_multidomain_autonomous_assurance_final_timing_validation ;;
   run_s2_multidomain_selective_assurance) run_s2_multidomain_selective_assurance ;;
   run_s2_multidomain_selective_assurance_foundation) run_s2_multidomain_selective_assurance_foundation ;;
+  run_s2_multidomain_selective_assurance_validation) run_s2_multidomain_selective_assurance_validation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;
