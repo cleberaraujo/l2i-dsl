@@ -102,6 +102,7 @@ def main() -> None:
         "OPTIONAL_MAX_SEMANTICS",
         intent.bandwidth_min_mbps == 4.0
         and intent.bandwidth_max_mbps is None
+        and intent.delivery_min_ratio == 0.99
         and "max_mbps" not in intent.to_backend_intent(),
     )
     control_intent = intent.to_backend_intent()
@@ -433,12 +434,68 @@ def main() -> None:
             and invalid_rejected,
         )
 
-        incomplete_result = s1.TimedCommand(
+        accounted_loss_result = s1.TimedCommand(
             name="rtt_probes",
             argv=["ping"],
             returncode=0,
             stdout=(
-                "64 bytes from 10.0.0.3: time=1.000 ms\n"
+                "64 bytes from 10.0.0.3: icmp_seq=1 time=1.000 ms\n"
+                "2 packets transmitted, 1 received, 50% packet loss\n"
+            ),
+            stderr="",
+            started_offset_s=0.0,
+            ended_offset_s=1.0,
+            elapsed_s=1.0,
+        )
+        accounted_loss = s1._parse_ping_measurement(
+            result=accounted_loss_result,
+            requested_samples=2,
+            csv_path=temporary_root / "accounted-loss.csv",
+        )
+        require(
+            "PACKET_LOSS_ACCOUNTED",
+            accounted_loss["complete"] is True
+            and accounted_loss["received"] == 1
+            and accounted_loss["lost"] == 1
+            and accounted_loss["missing_sequences"] == [2]
+            and accounted_loss["delivery_ratio"] == 0.5
+            and (
+                temporary_root / "accounted-loss.csv"
+            ).read_text(encoding="utf-8").endswith("2,\n"),
+        )
+        require(
+            "DELIVERY_REQUIREMENT_EXPLICIT",
+            intent.delivery_min_ratio == 0.99
+            and accounted_loss["delivery_ratio"]
+            < intent.delivery_min_ratio,
+        )
+        loss_metrics, loss_conformance = s1._evaluate_conformance(
+            intent=intent,
+            data_plane={
+                "rtt": accounted_loss,
+                "sensitive": {"throughput_mbps": 4.0},
+                "best_effort": {"throughput_mbps": 30.0},
+                "observed_windows": {
+                    "simultaneous_overlap_s": 2.9,
+                },
+            },
+            measurement_valid=True,
+            bandwidth_tolerance_mbps=0.25,
+        )
+        require(
+            "LOSS_AFFECTS_OVERALL_CONFORMANCE",
+            loss_metrics["rtt_lost_probes"] == 1
+            and loss_conformance["measurement_valid"] is True
+            and loss_conformance["delivery_ok"] is False
+            and loss_conformance["intent_ok"] is False,
+        )
+
+        inconsistent_result = s1.TimedCommand(
+            name="rtt_probes",
+            argv=["ping"],
+            returncode=2,
+            stdout=(
+                "64 bytes from 10.0.0.3: icmp_seq=1 time=1.000 ms\n"
                 "2 packets transmitted, 1 received, 50% packet loss\n"
             ),
             stderr="",
@@ -449,7 +506,7 @@ def main() -> None:
         incomplete_rejected = False
         try:
             s1._parse_ping_measurement(
-                result=incomplete_result,
+                result=inconsistent_result,
                 requested_samples=2,
                 csv_path=temporary_root / "incomplete.csv",
             )

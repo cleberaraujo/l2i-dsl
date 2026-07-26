@@ -83,6 +83,7 @@ class S1Intent:
     flow_id: str
     latency_percentile: str
     latency_max_ms: float
+    delivery_min_ratio: float
     bandwidth_min_mbps: float
     bandwidth_max_mbps: Optional[float]
     priority: str
@@ -168,6 +169,15 @@ def _nonnegative_float(value: Any, label: str) -> float:
     return number
 
 
+def _unit_interval_float(value: Any, label: str) -> float:
+    """Parse one finite ratio in the closed interval from zero to one."""
+
+    number = _nonnegative_float(value, label)
+    if number > 1:
+        raise S1ExecutionError(f"{label} must not exceed one")
+    return number
+
+
 def _load_specification(path: Path) -> Tuple[Dict[str, Any], S1Intent]:
     """Load and validate the canonical S1 syntax without legacy fallback."""
 
@@ -201,11 +211,14 @@ def _load_specification(path: Path) -> Tuple[Dict[str, Any], S1Intent]:
     if not isinstance(requirements, dict):
         raise S1ExecutionError("requirements must be an object")
     latency = requirements.get("latency")
+    delivery = requirements.get("delivery")
     bandwidth = requirements.get("bandwidth")
     priority = requirements.get("priority")
     multicast = requirements.get("multicast", {"enabled": False})
     if not isinstance(latency, dict):
         raise S1ExecutionError("S1 requires requirements.latency")
+    if not isinstance(delivery, dict):
+        raise S1ExecutionError("S1 requires requirements.delivery")
     if not isinstance(bandwidth, dict):
         raise S1ExecutionError("S1 requires requirements.bandwidth")
     if not isinstance(priority, dict):
@@ -221,6 +234,10 @@ def _load_specification(path: Path) -> Tuple[Dict[str, Any], S1Intent]:
     latency_max_ms = _positive_float(
         latency.get("max_ms"),
         "requirements.latency.max_ms",
+    )
+    delivery_min_ratio = _unit_interval_float(
+        delivery.get("min_ratio"),
+        "requirements.delivery.min_ratio",
     )
     minimum = _positive_float(
         bandwidth.get("min_mbps"),
@@ -250,6 +267,7 @@ def _load_specification(path: Path) -> Tuple[Dict[str, Any], S1Intent]:
         flow_id=str(flow["id"]).strip(),
         latency_percentile=percentile,
         latency_max_ms=latency_max_ms,
+        delivery_min_ratio=delivery_min_ratio,
         bandwidth_min_mbps=minimum,
         bandwidth_max_mbps=maximum,
         priority=priority_level,
@@ -986,49 +1004,76 @@ def _parse_ping_measurement(
     requested_samples: int,
     csv_path: Path,
 ) -> Dict[str, Any]:
-    """Parse RTT while rejecting any empty or incomplete sample set."""
+    """Parse RTT and account explicitly for every requested probe."""
 
     transmitted, received = _parse_ping_counts(result.stdout)
-    sample_pattern = re.compile(r"\btime[=<]([0-9]+(?:\.[0-9]+)?)\s*ms")
-    values = [float(match) for match in sample_pattern.findall(result.stdout)]
+    sample_pattern = re.compile(
+        r"\bicmp_seq=(\d+)\b[^\n]*?"
+        r"\btime[=<]([0-9]+(?:\.[0-9]+)?)\s*ms"
+    )
+    parsed_pairs = [
+        (int(sequence), float(value))
+        for sequence, value in sample_pattern.findall(result.stdout)
+    ]
+    sequences = [sequence for sequence, _ in parsed_pairs]
+    if len(sequences) != len(set(sequences)):
+        raise S1ExecutionError("RTT measurement contains duplicate sequences")
+    if any(
+        sequence < 1 or sequence > requested_samples
+        for sequence in sequences
+    ):
+        raise S1ExecutionError(
+            "RTT measurement contains an out-of-range sequence"
+        )
 
+    by_sequence = dict(parsed_pairs)
+    missing_sequences = [
+        sequence
+        for sequence in range(1, requested_samples + 1)
+        if sequence not in by_sequence
+    ]
     rows = ["seq,rtt_ms"]
     rows.extend(
-        f"{index},{value:.6f}"
-        for index, value in enumerate(values, start=1)
+        (
+            f"{sequence},{by_sequence[sequence]:.6f}"
+            if sequence in by_sequence
+            else f"{sequence},"
+        )
+        for sequence in range(1, requested_samples + 1)
     )
     atomic_write_text(csv_path, "\n".join(rows) + "\n")
 
     complete = (
-        result.returncode == 0
+        result.returncode in {0, 1}
         and transmitted == requested_samples
-        and received == requested_samples
-        and len(values) == requested_samples
+        and 0 <= received <= transmitted
+        and len(parsed_pairs) == received
+        and received + len(missing_sequences) == requested_samples
     )
+    values = list(by_sequence.values())
     evidence: Dict[str, Any] = {
         "requested": requested_samples,
         "transmitted": transmitted,
         "received": received,
         "parsed_samples": len(values),
+        "lost": transmitted - received,
+        "missing_sequences": missing_sequences,
         "delivery_ratio": (
             received / transmitted if transmitted > 0 else 0.0
         ),
         "complete": complete,
     }
-    if not values:
-        raise S1ExecutionError("RTT measurement contains no samples")
 
     evidence["rtt_ms"] = {
-        "p50": _percentile(values, 0.50),
-        "p95": _percentile(values, 0.95),
-        "p99": _percentile(values, 0.99),
-        "minimum": min(values),
-        "maximum": max(values),
+        "p50": _percentile(values, 0.50) if values else None,
+        "p95": _percentile(values, 0.95) if values else None,
+        "p99": _percentile(values, 0.99) if values else None,
+        "minimum": min(values) if values else None,
+        "maximum": max(values) if values else None,
     }
     if not complete:
         raise S1ExecutionError(
-            "RTT measurement is incomplete; missing probes cannot be "
-            "silently excluded from conformance"
+            "RTT evidence is incomplete or internally inconsistent"
         )
     return evidence
 
@@ -1241,6 +1286,21 @@ def _run_data_plane(
                     for server in server_evidence
                 },
             },
+            "exit_status_acceptable": {
+                "sensitive_tcp": sensitive.returncode == 0,
+                "best_effort_tcp": best_effort.returncode == 0,
+                # iputils uses zero or one for outcome-dependent ping
+                # completion.  Once counts and sequences are internally
+                # consistent, either is an observation rather than a process
+                # failure; status two and other failures remain rejected.
+                "rtt_probes": rtt.returncode in {0, 1},
+                **{
+                    f"iperf_server_{server['port']}": (
+                        server["returncode"] == 0
+                    )
+                    for server in server_evidence
+                },
+            },
         }
     finally:
         if sensitive_server is not None:
@@ -1262,6 +1322,85 @@ def _run_data_plane(
                 artifacts["iperf_servers_json"],
                 server_evidence,
             )
+
+
+def _evaluate_conformance(
+    *,
+    intent: S1Intent,
+    data_plane: Mapping[str, Any],
+    measurement_valid: bool,
+    bandwidth_tolerance_mbps: float,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Evaluate latency, delivery, and bandwidth without hiding packet loss."""
+
+    rtt_key = intent.latency_percentile.lower()
+    observed_rtt_raw = data_plane["rtt"]["rtt_ms"][rtt_key]
+    observed_rtt = (
+        float(observed_rtt_raw)
+        if observed_rtt_raw is not None
+        else None
+    )
+    delivery_ratio = float(data_plane["rtt"]["delivery_ratio"])
+    sensitive_throughput = float(
+        data_plane["sensitive"]["throughput_mbps"]
+    )
+    tolerance = float(bandwidth_tolerance_mbps)
+
+    latency_ok = (
+        observed_rtt is not None
+        and observed_rtt <= intent.latency_max_ms
+    )
+    delivery_ok = delivery_ratio >= intent.delivery_min_ratio
+    bandwidth_min_ok = (
+        sensitive_throughput + tolerance
+        >= intent.bandwidth_min_mbps
+    )
+    bandwidth_max_ok = (
+        True
+        if intent.bandwidth_max_mbps is None
+        else sensitive_throughput
+        <= intent.bandwidth_max_mbps + tolerance
+    )
+    bandwidth_ok = bandwidth_min_ok and bandwidth_max_ok
+
+    metrics = {
+        "rtt_percentile": intent.latency_percentile,
+        "rtt_percentile_ms": observed_rtt,
+        "rtt_ms": data_plane["rtt"]["rtt_ms"],
+        "rtt_samples": data_plane["rtt"]["parsed_samples"],
+        "rtt_lost_probes": data_plane["rtt"]["lost"],
+        "rtt_missing_sequences": data_plane["rtt"][
+            "missing_sequences"
+        ],
+        "delivery_ratio": delivery_ratio,
+        "sensitive_throughput_mbps": sensitive_throughput,
+        "best_effort_throughput_mbps": float(
+            data_plane["best_effort"]["throughput_mbps"]
+        ),
+        "simultaneous_overlap_s": data_plane[
+            "observed_windows"
+        ]["simultaneous_overlap_s"],
+    }
+    conformance = {
+        "measurement_valid": measurement_valid,
+        "latency_ok": latency_ok,
+        "delivery_min_ratio": intent.delivery_min_ratio,
+        "delivery_ok": delivery_ok,
+        "bandwidth_min_ok": bandwidth_min_ok,
+        "bandwidth_max_declared": (
+            intent.bandwidth_max_mbps is not None
+        ),
+        "bandwidth_max_ok": bandwidth_max_ok,
+        "bandwidth_ok": bandwidth_ok,
+        "intent_ok": (
+            measurement_valid
+            and latency_ok
+            and delivery_ok
+            and bandwidth_ok
+        ),
+        "bandwidth_tolerance_mbps": tolerance,
+    }
+    return metrics, conformance
 
 
 def _validate_arguments(args: argparse.Namespace, intent: S1Intent) -> None:
@@ -1765,8 +1904,7 @@ def execute(args: argparse.Namespace) -> Path:
         summary["timing"]["data_plane_ms"] = round(data_ms, 3)
         summary["data_plane"] = data_plane
         summary["gates"]["data_plane_exit_codes"] = all(
-            status == 0
-            for status in data_plane["exit_codes"].values()
+            data_plane["exit_status_acceptable"].values()
         )
         summary["gates"]["measurement_complete"] = bool(
             data_plane["rtt"]["complete"]
@@ -1775,24 +1913,7 @@ def execute(args: argparse.Namespace) -> Path:
             data_plane["observed_windows"]["complete"]
         )
 
-        rtt_key = intent.latency_percentile.lower()
-        observed_rtt = float(data_plane["rtt"]["rtt_ms"][rtt_key])
-        sensitive_throughput = float(
-            data_plane["sensitive"]["throughput_mbps"]
-        )
         tolerance = float(args.bandwidth_tolerance_mbps)
-        latency_ok = observed_rtt <= intent.latency_max_ms
-        bandwidth_min_ok = (
-            sensitive_throughput + tolerance
-            >= intent.bandwidth_min_mbps
-        )
-        bandwidth_max_ok = (
-            True
-            if intent.bandwidth_max_mbps is None
-            else sensitive_throughput
-            <= intent.bandwidth_max_mbps + tolerance
-        )
-        bandwidth_ok = bandwidth_min_ok and bandwidth_max_ok
         all_measurement_gates = all(
             summary["gates"][key]
             for key in (
@@ -1801,37 +1922,14 @@ def execute(args: argparse.Namespace) -> Path:
                 "simultaneous_window",
             )
         )
-
-        summary["metrics"] = {
-            "rtt_percentile": intent.latency_percentile,
-            "rtt_percentile_ms": observed_rtt,
-            "rtt_ms": data_plane["rtt"]["rtt_ms"],
-            "rtt_samples": data_plane["rtt"]["parsed_samples"],
-            "delivery_ratio": data_plane["rtt"]["delivery_ratio"],
-            "sensitive_throughput_mbps": sensitive_throughput,
-            "best_effort_throughput_mbps": float(
-                data_plane["best_effort"]["throughput_mbps"]
-            ),
-            "simultaneous_overlap_s": data_plane[
-                "observed_windows"
-            ]["simultaneous_overlap_s"],
-        }
-        summary["conformance"] = {
-            "measurement_valid": all_measurement_gates,
-            "latency_ok": latency_ok,
-            "bandwidth_min_ok": bandwidth_min_ok,
-            "bandwidth_max_declared": (
-                intent.bandwidth_max_mbps is not None
-            ),
-            "bandwidth_max_ok": bandwidth_max_ok,
-            "bandwidth_ok": bandwidth_ok,
-            "intent_ok": (
-                all_measurement_gates
-                and latency_ok
-                and bandwidth_ok
-            ),
-            "bandwidth_tolerance_mbps": tolerance,
-        }
+        metrics, conformance = _evaluate_conformance(
+            intent=intent,
+            data_plane=data_plane,
+            measurement_valid=all_measurement_gates,
+            bandwidth_tolerance_mbps=tolerance,
+        )
+        summary["metrics"] = metrics
+        summary["conformance"] = conformance
         summary["run_status"] = "completed"
         summary["completed_at_utc"] = utc_rfc3339()
         summary["timing"]["script_total_ms"] = round(

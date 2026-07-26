@@ -36,10 +36,16 @@ shared synchronization barrier. Their observed start and end times are stored,
 and at least 90 percent of the configured traffic duration must be simultaneous.
 
 Every subprocess exit code is recorded. Iperf output must contain a complete,
-positive receiver summary. RTT samples must be non-empty and complete:
-transmitted, received, requested, and parsed sample counts must match. Missing
-probes are included in delivery ratio and invalidate the measurement rather
-than being silently excluded from conformance.
+positive receiver summary. RTT evidence is complete when the requested and
+transmitted counts match and every transmitted sequence is accounted for as
+received or lost. Partial packet delivery is therefore a valid observation,
+not a collection failure; the outcome-dependent iputils statuses `0` and `1`
+are accepted only when packet counts and sequences are internally consistent,
+while execution errors remain rejected. Missing probes are written as explicit
+empty RTT rows, listed by sequence, and included in the delivery ratio. The
+latency percentile is calculated over delivered probes, while the independently
+declared minimum delivery ratio participates in intent conformance. Thus a lost
+probe is never silently excluded from the overall result.
 
 ## Bandwidth semantics
 

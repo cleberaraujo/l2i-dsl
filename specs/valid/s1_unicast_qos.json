@@ -7,6 +7,7 @@
   },
   "requirements": {
     "latency": { "max_ms": 30, "percentile": "P99" },
+    "delivery": { "min_ratio": 0.99 },
     "bandwidth": { "min_mbps": 4 },
     "priority": { "level": "high" },
     "multicast": { "enabled": false }
