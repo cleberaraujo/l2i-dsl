@@ -1521,6 +1521,82 @@ run_s2_multidomain_autonomous_assurance_final_timing_validation() {
 }
 
 
+run_s2_multidomain_selective_assurance() {
+  require_repo_layout
+
+  local output_dir="${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_OUTPUT_DIR:-$REPO_DIR/results/S2/multidomain-selective-assurance-$(date -u +%Y%m%dT%H%M%SZ)}"
+
+  # Reuse the certified Phase 17 domain adapters and MAD controller while the
+  # Phase 18 scenario varies only the independent fault subset and the bounded
+  # synthetic test rejection policy.
+  run_python_script_as_root \
+    "$REPO_DIR/scripts/s2_multidomain_selective_assurance.py" \
+      orchestrate \
+      --output-dir "$output_dir" \
+      --condition-id "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_CONDITION_ID:-manual}" \
+      --assurance-profile-id "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_PROFILE_ID:-phase18-s2-multidomain-selective-assurance-foundation-v1}" \
+      --fault-domains "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_FAULT_DOMAINS-A,B,C}" \
+      --synthetic-rejection-domain "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_SYNTHETIC_REJECTION_DOMAIN:-}" \
+      --synthetic-rejection-count "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_SYNTHETIC_REJECTION_COUNT:-0}" \
+      --timing-candidate-policy "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_TIMING_CANDIDATE_POLICY:-observe-only}" \
+      --linux-device "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_LINUX_DEVICE:-l2i-md-a0}" \
+      --linux-peer "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_LINUX_PEER:-l2i-md-a1}" \
+      --netconf-host "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_NETCONF_HOST:-127.0.0.1}" \
+      --netconf-port "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_NETCONF_PORT:-$NETCONF_PORT}" \
+      --netconf-username "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_NETCONF_USERNAME:-$NETCONF_USER}" \
+      --netconf-key "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_NETCONF_KEY:-$NETCONF_KEY}" \
+      --netconf-timeout-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_NETCONF_TIMEOUT_S:-5}" \
+      --p4-addr "$P4_ADDR" \
+      --p4-host 127.0.0.1 \
+      --p4-port "$P4_PORT" \
+      --device-id 0 \
+      --p4-outdir /tmp/l2i_minimal \
+      --group "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_GROUP:-239.1.1.1}" \
+      --group-id "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_GROUP_ID:-1}" \
+      --multicast-ports 1 2 \
+      --multicast-port "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MULTICAST_PORT:-5001}" \
+      --observer-election-low "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_OBSERVER_ELECTION_LOW:-18100}" \
+      --injector-election-low "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_INJECTOR_ELECTION_LOW:-18110}" \
+      --initial-cleanup-election-low "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_INITIAL_CLEANUP_ELECTION_LOW:-18180}" \
+      --initial-program-election-low "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_INITIAL_PROGRAM_ELECTION_LOW:-18190}" \
+      --remediation-election-low "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_REMEDIATION_ELECTION_LOW:-18120}" \
+      --cleanup-election-low "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_CLEANUP_ELECTION_LOW:-18990}" \
+      --qos-class "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_QOS_CLASS:-prio10}" \
+      --capacity-mbps "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_CAPACITY_MBPS:-3}" \
+      --minimum-mbps "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MINIMUM_MBPS:-2}" \
+      --maximum-mbps "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MAXIMUM_MBPS:-3}" \
+      --fault-after-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_FAULT_AFTER_S:-4}" \
+      --no-fault-observation-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_NO_FAULT_OBSERVATION_S:-3}" \
+      --injector-completion-timeout-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_INJECTOR_COMPLETION_TIMEOUT_S:-12}" \
+      --assurance-recovery-timeout-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_RECOVERY_TIMEOUT_S:-18}" \
+      --maximum-detection-ms "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MAX_DETECTION_MS:-4000}" \
+      --maximum-control-plane-recovery-ms "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MAX_CONTROL_PLANE_RECOVERY_MS:-3750}" \
+      --maximum-total-reconciliation-ms "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MAX_TOTAL_RECONCILIATION_MS:-6250}" \
+      --assurance-poll-interval-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_POLL_INTERVAL_S:-0.05}" \
+      --assurance-drift-confirmations "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_DRIFT_CONFIRMATIONS:-3}" \
+      --assurance-convergence-confirmations "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_CONVERGENCE_CONFIRMATIONS:-2}" \
+      --assurance-maximum-remediation-attempts "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MAX_REMEDIATION_ATTEMPTS:-3}" \
+      --assurance-initial-backoff-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_INITIAL_BACKOFF_S:-0.05}" \
+      --assurance-backoff-multiplier "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_BACKOFF_MULTIPLIER:-2}" \
+      --assurance-maximum-backoff-s "${S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_MAX_BACKOFF_S:-0.5}"
+
+  local rc=$?
+  echo "S2_MULTIDOMAIN_SELECTIVE_ASSURANCE_OUTPUT_DIR=$output_dir"
+  return "$rc"
+}
+
+
+run_s2_multidomain_selective_assurance_foundation() {
+  require_repo_layout
+
+  # Run the six-condition Phase 18 foundation: no-fault control, three
+  # single-domain drifts, simultaneous drift, and one synthetic partial reject.
+  run \
+    "$REPO_DIR/scripts/run_s2_multidomain_selective_assurance_foundation.sh" \
+    "${PHASE18_FOUNDATION_OUTPUT_DIR:-$REPO_DIR/results/S2/multidomain-selective-assurance-foundation-$(date -u +%Y%m%dT%H%M%SZ)}"
+}
+
+
 run_s2_p4_state_recovery_foundation() {
   require_repo_layout
 
@@ -1666,6 +1742,8 @@ Ações internas úteis:
   run_s2_multidomain_autonomous_assurance_foundation
   run_s2_multidomain_autonomous_assurance_timing_validation
   run_s2_multidomain_autonomous_assurance_final_timing_validation
+  run_s2_multidomain_selective_assurance
+  run_s2_multidomain_selective_assurance_foundation
   cleanup_topologies_only
 
 Variáveis úteis:
@@ -1730,6 +1808,8 @@ case "${1:-}" in
   run_s2_multidomain_autonomous_assurance_foundation) run_s2_multidomain_autonomous_assurance_foundation ;;
   run_s2_multidomain_autonomous_assurance_timing_validation) run_s2_multidomain_autonomous_assurance_timing_validation ;;
   run_s2_multidomain_autonomous_assurance_final_timing_validation) run_s2_multidomain_autonomous_assurance_final_timing_validation ;;
+  run_s2_multidomain_selective_assurance) run_s2_multidomain_selective_assurance ;;
+  run_s2_multidomain_selective_assurance_foundation) run_s2_multidomain_selective_assurance_foundation ;;
   cleanup_topologies_only) cleanup_topologies_only ;;
   cleanup) cleanup ;;
   *) usage; exit 1 ;;

@@ -64,6 +64,8 @@ class MultiDomainAssuranceAdapter:
     def __init__(
         self,
         bindings: Sequence[DomainAssuranceBinding],
+        *,
+        synthetic_rejection_budget: Mapping[str, int] | None = None,
     ) -> None:
         if not bindings:
             raise ValueError("at least one domain binding is required")
@@ -83,6 +85,32 @@ class MultiDomainAssuranceAdapter:
             binding.domain_id: binding
             for binding in ordered
         }
+
+        rejection_budget = {
+            str(domain_id): int(count)
+            for domain_id, count in dict(
+                synthetic_rejection_budget or {}
+            ).items()
+        }
+        unknown_rejection_domains = sorted(
+            set(rejection_budget) - set(self._binding_by_id)
+        )
+        if unknown_rejection_domains:
+            raise ValueError(
+                "synthetic rejection budget contains unmanaged domains: "
+                + ",".join(unknown_rejection_domains)
+            )
+        negative_rejection_domains = sorted(
+            domain_id
+            for domain_id, count in rejection_budget.items()
+            if count < 0
+        )
+        if negative_rejection_domains:
+            raise ValueError(
+                "synthetic rejection budget cannot be negative: "
+                + ",".join(negative_rejection_domains)
+            )
+
         self._lock = threading.Lock()
         self._latest: dict[str, StateObservation] = {}
         self._observation_count = 0
@@ -91,6 +119,21 @@ class MultiDomainAssuranceAdapter:
             binding.domain_id: 0
             for binding in ordered
         }
+        self._domain_backend_remediation_counts = {
+            binding.domain_id: 0
+            for binding in ordered
+        }
+        self._domain_synthetic_rejection_counts = {
+            binding.domain_id: 0
+            for binding in ordered
+        }
+        self._synthetic_rejection_initial = {
+            binding.domain_id: rejection_budget.get(binding.domain_id, 0)
+            for binding in ordered
+        }
+        self._synthetic_rejection_remaining = dict(
+            self._synthetic_rejection_initial
+        )
         self._remediation_history: list[dict[str, Any]] = []
 
     @property
@@ -110,6 +153,9 @@ class MultiDomainAssuranceAdapter:
             ),
             "remediation_policy": (
                 "selective_best_effort_without_cross_domain_rollback"
+            ),
+            "synthetic_test_rejection_budget": dict(
+                self._synthetic_rejection_initial
             ),
         }
 
@@ -237,28 +283,67 @@ class MultiDomainAssuranceAdapter:
                 }
                 continue
 
-            try:
-                outcome = binding.remediate_fn(
-                    domain_observation,
-                    incident_id,
-                    attempt,
+            # A bounded synthetic rejection is injected above the real backend
+            # callback. It is explicitly test-only: no backend write is attempted,
+            # the domain remains divergent, and the generic controller must later
+            # retry only the domains still reported as unhealthy.
+            with self._lock:
+                remaining_rejections = (
+                    self._synthetic_rejection_remaining.get(domain_id, 0)
                 )
-            except Exception as exc:  # pragma: no cover - defensive boundary
+                if remaining_rejections > 0:
+                    self._synthetic_rejection_remaining[domain_id] = (
+                        remaining_rejections - 1
+                    )
+
+            synthetic_rejection = remaining_rejections > 0
+            if synthetic_rejection:
                 outcome = RemediationOutcome(
                     accepted=False,
                     details={
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
+                        "synthetic_test_rejection": True,
+                        "domain": domain_id,
+                        "incident_id": incident_id,
+                        "attempt": attempt,
+                        "remaining_synthetic_rejections": (
+                            remaining_rejections - 1
+                        ),
+                        "backend_callback_invoked": False,
                     },
                 )
+            else:
+                try:
+                    outcome = binding.remediate_fn(
+                        domain_observation,
+                        incident_id,
+                        attempt,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive boundary
+                    outcome = RemediationOutcome(
+                        accepted=False,
+                        details={
+                            "exception_type": type(exc).__name__,
+                            "exception_message": str(exc),
+                            "backend_callback_invoked": True,
+                        },
+                    )
 
             all_accepted = all_accepted and outcome.accepted
             results[domain_id] = {
                 "technology": binding.technology,
+                "remediation_mode": (
+                    "synthetic_test_rejection"
+                    if synthetic_rejection
+                    else "backend_callback"
+                ),
                 **outcome.to_dict(),
             }
             with self._lock:
                 self._domain_remediation_counts[domain_id] += 1
+                if synthetic_rejection:
+                    self._domain_synthetic_rejection_counts[domain_id] += 1
+                else:
+                    self._domain_backend_remediation_counts[domain_id] += 1
 
         completed_ns = time.monotonic_ns()
         record = {
@@ -299,6 +384,18 @@ class MultiDomainAssuranceAdapter:
                 "remediation_count": self._remediation_count,
                 "domain_remediation_counts": dict(
                     self._domain_remediation_counts
+                ),
+                "domain_backend_remediation_counts": dict(
+                    self._domain_backend_remediation_counts
+                ),
+                "domain_synthetic_rejection_counts": dict(
+                    self._domain_synthetic_rejection_counts
+                ),
+                "synthetic_rejection_initial": dict(
+                    self._synthetic_rejection_initial
+                ),
+                "synthetic_rejection_remaining": dict(
+                    self._synthetic_rejection_remaining
                 ),
                 "remediation_history": [
                     dict(item)
