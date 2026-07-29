@@ -1,0 +1,39 @@
+{
+  "fixture_version": "phase19-assignment-v2-fixture-v1",
+  "valid": false,
+  "expected_error": "INVALID_RANDOMIZATION_MANIFEST_SHA256",
+  "identity": {
+    "scenario_id": "S2",
+    "execution_id": "invalid-hash",
+    "profile_id": "pilot",
+    "backend_mode": "mock"
+  },
+  "assignments": [
+    {
+      "campaign_id": "campaign-invalid",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ4",
+      "configuration_id": "pilot",
+      "arm": "A",
+      "treatment": "observation_only",
+      "block_id": "invalid-hash-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "AB",
+      "randomization_manifest_sha256": "ABC123"
+    },
+    {
+      "campaign_id": "campaign-invalid",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ4",
+      "configuration_id": "pilot",
+      "arm": "B",
+      "treatment": "selective_assurance",
+      "block_id": "invalid-hash-001",
+      "block_index": 1,
+      "period": 2,
+      "order": "AB",
+      "randomization_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}

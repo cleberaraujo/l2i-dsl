@@ -1,0 +1,26 @@
+{
+  "fixture_version": "phase19-assignment-v2-fixture-v1",
+  "valid": false,
+  "expected_error": "INCOMPLETE_BLOCK",
+  "identity": {
+    "scenario_id": "S2",
+    "execution_id": "invalid-incomplete",
+    "profile_id": "foundation",
+    "backend_mode": "mock"
+  },
+  "assignments": [
+    {
+      "campaign_id": "campaign-invalid",
+      "campaign_stage": "foundation",
+      "rq_id": "RQ4",
+      "configuration_id": "foundation",
+      "arm": "A",
+      "treatment": "observation_only",
+      "block_id": "invalid-incomplete-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "AB",
+      "randomization_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}

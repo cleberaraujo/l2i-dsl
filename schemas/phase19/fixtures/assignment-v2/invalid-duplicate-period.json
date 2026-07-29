@@ -1,0 +1,39 @@
+{
+  "fixture_version": "phase19-assignment-v2-fixture-v1",
+  "valid": false,
+  "expected_error": "DUPLICATE_PERIOD",
+  "identity": {
+    "scenario_id": "S1",
+    "execution_id": "invalid-duplicate-period",
+    "profile_id": "nominal",
+    "backend_mode": "real"
+  },
+  "assignments": [
+    {
+      "campaign_id": "campaign-invalid",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ3",
+      "configuration_id": "nominal",
+      "arm": "A",
+      "treatment": "baseline",
+      "block_id": "invalid-period-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "AB",
+      "randomization_manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "campaign_id": "campaign-invalid",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ3",
+      "configuration_id": "nominal",
+      "arm": "B",
+      "treatment": "adapt",
+      "block_id": "invalid-period-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "BA",
+      "randomization_manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ]
+}

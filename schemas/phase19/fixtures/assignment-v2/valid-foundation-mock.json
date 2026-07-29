@@ -1,0 +1,38 @@
+{
+  "fixture_version": "phase19-assignment-v2-fixture-v1",
+  "valid": true,
+  "identity": {
+    "scenario_id": "S2",
+    "execution_id": "fixture-foundation-mock",
+    "profile_id": "foundation",
+    "backend_mode": "mock"
+  },
+  "assignments": [
+    {
+      "campaign_id": "campaign-foundation",
+      "campaign_stage": "foundation",
+      "rq_id": "RQ4",
+      "configuration_id": "foundation",
+      "arm": "A",
+      "treatment": "observation_only",
+      "block_id": "foundation-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "AB",
+      "randomization_manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "campaign_id": "campaign-foundation",
+      "campaign_stage": "foundation",
+      "rq_id": "RQ4",
+      "configuration_id": "foundation",
+      "arm": "B",
+      "treatment": "selective_assurance",
+      "block_id": "foundation-001",
+      "block_index": 1,
+      "period": 2,
+      "order": "AB",
+      "randomization_manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "fixture_version": "phase19-assignment-v2-fixture-v1",
+  "valid": true,
+  "identity": {
+    "scenario_id": "S2",
+    "execution_id": "fixture-confirmatory-real",
+    "profile_id": "confirmatory",
+    "backend_mode": "real"
+  },
+  "assignments": [
+    {
+      "campaign_id": "campaign-confirmatory",
+      "campaign_stage": "confirmatory",
+      "rq_id": "RQ4",
+      "configuration_id": "confirmatory",
+      "arm": "A",
+      "treatment": "observation_only",
+      "block_id": "confirmatory-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "AB",
+      "randomization_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "campaign_id": "campaign-confirmatory",
+      "campaign_stage": "confirmatory",
+      "rq_id": "RQ4",
+      "configuration_id": "confirmatory",
+      "arm": "B",
+      "treatment": "selective_assurance",
+      "block_id": "confirmatory-001",
+      "block_index": 1,
+      "period": 2,
+      "order": "AB",
+      "randomization_manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}

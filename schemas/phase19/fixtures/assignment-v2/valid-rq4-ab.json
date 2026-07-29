@@ -1,0 +1,38 @@
+{
+  "fixture_version": "phase19-assignment-v2-fixture-v1",
+  "valid": true,
+  "identity": {
+    "scenario_id": "S2",
+    "execution_id": "fixture-rq4-ab",
+    "profile_id": "nominal",
+    "backend_mode": "real"
+  },
+  "assignments": [
+    {
+      "campaign_id": "campaign-rq4",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ4",
+      "configuration_id": "nominal",
+      "arm": "A",
+      "treatment": "observation_only",
+      "block_id": "rq4-ab-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "AB",
+      "randomization_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "campaign_id": "campaign-rq4",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ4",
+      "configuration_id": "nominal",
+      "arm": "B",
+      "treatment": "selective_assurance",
+      "block_id": "rq4-ab-001",
+      "block_index": 1,
+      "period": 2,
+      "order": "AB",
+      "randomization_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}

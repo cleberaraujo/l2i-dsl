@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://l2i.local/schemas/phase19/experiment-assignment-v2.schema.json",
+  "title": "L2I Phase 19 experiment assignment v2",
+  "description": "Schema for one experimental assignment. Physical execution identity is validated separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "campaign_id",
+    "campaign_stage",
+    "rq_id",
+    "configuration_id",
+    "arm",
+    "treatment",
+    "block_id",
+    "block_index",
+    "period",
+    "order",
+    "randomization_manifest_sha256"
+  ],
+  "properties": {
+    "campaign_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "campaign_stage": {
+      "type": "string",
+      "enum": ["foundation", "pilot", "confirmatory"]
+    },
+    "rq_id": {
+      "type": "string",
+      "enum": ["RQ3", "RQ4"]
+    },
+    "configuration_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "arm": {
+      "type": "string",
+      "enum": ["A", "B"]
+    },
+    "treatment": {
+      "type": "string",
+      "enum": [
+        "baseline",
+        "adapt",
+        "observation_only",
+        "selective_assurance"
+      ]
+    },
+    "block_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "block_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "period": {
+      "type": "integer",
+      "enum": [1, 2]
+    },
+    "order": {
+      "type": "string",
+      "enum": ["AB", "BA"]
+    },
+    "randomization_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"rq_id": {"const": "RQ3"}},
+        "required": ["rq_id"]
+      },
+      "then": {
+        "properties": {"treatment": {"enum": ["baseline", "adapt"]}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"rq_id": {"const": "RQ4"}},
+        "required": ["rq_id"]
+      },
+      "then": {
+        "properties": {
+          "treatment": {
+            "enum": ["observation_only", "selective_assurance"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "rq_id": {"const": "RQ3"},
+          "arm": {"const": "A"}
+        },
+        "required": ["rq_id", "arm"]
+      },
+      "then": {"properties": {"treatment": {"const": "baseline"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "rq_id": {"const": "RQ3"},
+          "arm": {"const": "B"}
+        },
+        "required": ["rq_id", "arm"]
+      },
+      "then": {"properties": {"treatment": {"const": "adapt"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "rq_id": {"const": "RQ4"},
+          "arm": {"const": "A"}
+        },
+        "required": ["rq_id", "arm"]
+      },
+      "then": {
+        "properties": {"treatment": {"const": "observation_only"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "rq_id": {"const": "RQ4"},
+          "arm": {"const": "B"}
+        },
+        "required": ["rq_id", "arm"]
+      },
+      "then": {
+        "properties": {"treatment": {"const": "selective_assurance"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "order": {"const": "AB"},
+          "period": {"const": 1}
+        },
+        "required": ["order", "period"]
+      },
+      "then": {"properties": {"arm": {"const": "A"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "order": {"const": "AB"},
+          "period": {"const": 2}
+        },
+        "required": ["order", "period"]
+      },
+      "then": {"properties": {"arm": {"const": "B"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "order": {"const": "BA"},
+          "period": {"const": 1}
+        },
+        "required": ["order", "period"]
+      },
+      "then": {"properties": {"arm": {"const": "B"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "order": {"const": "BA"},
+          "period": {"const": 2}
+        },
+        "required": ["order", "period"]
+      },
+      "then": {"properties": {"arm": {"const": "A"}}}
+    }
+  ]
+}

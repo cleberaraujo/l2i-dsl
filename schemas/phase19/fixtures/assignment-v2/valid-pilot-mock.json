@@ -1,0 +1,38 @@
+{
+  "fixture_version": "phase19-assignment-v2-fixture-v1",
+  "valid": true,
+  "identity": {
+    "scenario_id": "S2",
+    "execution_id": "fixture-pilot-mock",
+    "profile_id": "pilot",
+    "backend_mode": "mock"
+  },
+  "assignments": [
+    {
+      "campaign_id": "campaign-pilot",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ4",
+      "configuration_id": "pilot",
+      "arm": "B",
+      "treatment": "selective_assurance",
+      "block_id": "pilot-001",
+      "block_index": 1,
+      "period": 1,
+      "order": "BA",
+      "randomization_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "campaign_id": "campaign-pilot",
+      "campaign_stage": "pilot",
+      "rq_id": "RQ4",
+      "configuration_id": "pilot",
+      "arm": "A",
+      "treatment": "observation_only",
+      "block_id": "pilot-001",
+      "block_index": 1,
+      "period": 2,
+      "order": "BA",
+      "randomization_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ]
+}

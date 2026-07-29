@@ -22,8 +22,26 @@ from typing import Any, Mapping, Sequence
 
 
 _EXECUTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MODE_VALUES = frozenset({"baseline", "adapt"})
 _BACKEND_MODE_VALUES = frozenset({"mock", "real"})
+_CAMPAIGN_STAGE_VALUES = frozenset({"foundation", "pilot", "confirmatory"})
+_RQ_VALUES = frozenset({"RQ3", "RQ4"})
+_ARM_VALUES = frozenset({"A", "B"})
+_ORDER_VALUES = frozenset({"AB", "BA"})
+_PERIOD_VALUES = frozenset({1, 2})
+_TREATMENT_BY_RQ_AND_ARM = {
+    ("RQ3", "A"): "baseline",
+    ("RQ3", "B"): "adapt",
+    ("RQ4", "A"): "observation_only",
+    ("RQ4", "B"): "selective_assurance",
+}
+_ARM_BY_ORDER_AND_PERIOD = {
+    ("AB", 1): "A",
+    ("AB", 2): "B",
+    ("BA", 1): "B",
+    ("BA", 2): "A",
+}
 
 
 class ExperimentContractError(RuntimeError):
@@ -259,6 +277,221 @@ class ExperimentIdentity:
         """Return a JSON-compatible representation."""
 
         return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class ExperimentIdentityV2:
+    """Physical execution identity, independent of experimental assignment.
+
+    Unlike :class:`ExperimentIdentity`, this additive v2 identity deliberately
+    excludes treatment mode and repetition.  Those experimental dimensions
+    belong to :class:`ExperimentAssignmentV2`.
+    """
+
+    scenario_id: str
+    execution_id: str
+    profile_id: str
+    backend_mode: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("scenario_id", "execution_id", "profile_id"):
+            object.__setattr__(
+                self,
+                field_name,
+                _normalize_identifier(getattr(self, field_name), field_name),
+            )
+        if self.backend_mode not in _BACKEND_MODE_VALUES:
+            raise ExperimentContractError(
+                f"UNSUPPORTED_BACKEND_MODE: unsupported backend_mode: "
+                f"{self.backend_mode!r}"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible representation."""
+
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class ExperimentAssignmentV2:
+    """Preregistered assignment attached to one physical v2 execution."""
+
+    campaign_id: str
+    campaign_stage: str
+    rq_id: str
+    configuration_id: str
+    arm: str
+    treatment: str
+    block_id: str
+    block_index: int
+    period: int
+    order: str
+    randomization_manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("campaign_id", "configuration_id", "block_id"):
+            object.__setattr__(
+                self,
+                field_name,
+                _normalize_identifier(getattr(self, field_name), field_name),
+            )
+        if self.campaign_stage not in _CAMPAIGN_STAGE_VALUES:
+            raise ExperimentContractError(
+                "UNSUPPORTED_CAMPAIGN_STAGE: unsupported campaign_stage: "
+                f"{self.campaign_stage!r}"
+            )
+        if self.rq_id not in _RQ_VALUES:
+            raise ExperimentContractError(
+                f"UNSUPPORTED_RQ: unsupported rq_id: {self.rq_id!r}"
+            )
+        if self.arm not in _ARM_VALUES:
+            raise ExperimentContractError(
+                f"UNSUPPORTED_ARM: unsupported arm: {self.arm!r}"
+            )
+        if self.order not in _ORDER_VALUES:
+            raise ExperimentContractError(
+                f"UNSUPPORTED_ORDER: unsupported order: {self.order!r}"
+            )
+        if (
+            not isinstance(self.period, int)
+            or isinstance(self.period, bool)
+            or self.period not in _PERIOD_VALUES
+        ):
+            raise ExperimentContractError(
+                f"UNSUPPORTED_PERIOD: unsupported period: {self.period!r}"
+            )
+        if (
+            not isinstance(self.block_index, int)
+            or isinstance(self.block_index, bool)
+            or self.block_index < 1
+        ):
+            raise ExperimentContractError(
+                "INVALID_BLOCK_INDEX: block_index must be an integer greater "
+                "than zero"
+            )
+        if not isinstance(
+            self.randomization_manifest_sha256, str
+        ) or not _SHA256_PATTERN.fullmatch(self.randomization_manifest_sha256):
+            raise ExperimentContractError(
+                "INVALID_RANDOMIZATION_MANIFEST_SHA256: "
+                "randomization_manifest_sha256 must contain exactly 64 "
+                "lowercase hexadecimal characters"
+            )
+
+        expected_treatment = _TREATMENT_BY_RQ_AND_ARM[(self.rq_id, self.arm)]
+        if self.treatment != expected_treatment:
+            raise ExperimentContractError(
+                "ARM_TREATMENT_MISMATCH: "
+                f"{self.rq_id} arm {self.arm} requires treatment "
+                f"{expected_treatment!r}, received {self.treatment!r}"
+            )
+
+        expected_arm = _ARM_BY_ORDER_AND_PERIOD[(self.order, self.period)]
+        if self.arm != expected_arm:
+            raise ExperimentContractError(
+                "ORDER_PERIOD_ARM_MISMATCH: "
+                f"order {self.order} period {self.period} requires arm "
+                f"{expected_arm}, received {self.arm}"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible representation."""
+
+        return dataclasses.asdict(self)
+
+
+def validate_experiment_v2(
+    identity: ExperimentIdentityV2,
+    assignment: ExperimentAssignmentV2,
+) -> None:
+    """Validate invariants that span v2 identity and assignment."""
+
+    if not isinstance(identity, ExperimentIdentityV2):
+        raise ExperimentContractError(
+            "INVALID_IDENTITY_V2: identity must be ExperimentIdentityV2"
+        )
+    if not isinstance(assignment, ExperimentAssignmentV2):
+        raise ExperimentContractError(
+            "INVALID_ASSIGNMENT_V2: assignment must be ExperimentAssignmentV2"
+        )
+    if (
+        assignment.campaign_stage == "confirmatory"
+        and identity.backend_mode != "real"
+    ):
+        raise ExperimentContractError(
+            "CONFIRMATORY_REQUIRES_REAL: confirmatory assignments require "
+            "backend_mode 'real'"
+        )
+
+
+def validate_paired_block_v2(
+    assignments: Sequence[ExperimentAssignmentV2],
+) -> None:
+    """Validate one complete, counterbalanced two-period v2 block."""
+
+    if len(assignments) != 2:
+        raise ExperimentContractError(
+            "INCOMPLETE_BLOCK: paired block must contain exactly two assignments"
+        )
+    if not all(isinstance(item, ExperimentAssignmentV2) for item in assignments):
+        raise ExperimentContractError(
+            "INVALID_ASSIGNMENT_V2: paired block contains an invalid assignment"
+        )
+
+    arms = [item.arm for item in assignments]
+    if len(set(arms)) != 2:
+        raise ExperimentContractError(
+            "DUPLICATE_ARM: paired block must contain arms A and B exactly once"
+        )
+    periods = [item.period for item in assignments]
+    if len(set(periods)) != 2:
+        raise ExperimentContractError(
+            "DUPLICATE_PERIOD: paired block must contain periods 1 and 2 exactly once"
+        )
+
+    first = assignments[0]
+    common_fields = (
+        "campaign_id",
+        "campaign_stage",
+        "rq_id",
+        "configuration_id",
+        "block_id",
+        "block_index",
+        "order",
+        "randomization_manifest_sha256",
+    )
+    for field_name in common_fields:
+        if any(
+            getattr(item, field_name) != getattr(first, field_name)
+            for item in assignments[1:]
+        ):
+            raise ExperimentContractError(
+                "PAIRED_BLOCK_FIELD_MISMATCH: paired assignments must share "
+                f"{field_name}"
+            )
+
+    if set(periods) != _PERIOD_VALUES:
+        raise ExperimentContractError(
+            "INCOMPLETE_BLOCK: paired block must contain periods 1 and 2"
+        )
+    if set(arms) != _ARM_VALUES:
+        raise ExperimentContractError(
+            "INCOMPLETE_BLOCK: paired block must contain arms A and B"
+        )
+
+    for item in assignments:
+        expected_arm = _ARM_BY_ORDER_AND_PERIOD[(item.order, item.period)]
+        if item.arm != expected_arm:
+            raise ExperimentContractError(
+                "ORDER_PERIOD_ARM_MISMATCH: paired block violates its "
+                "order-period-arm mapping"
+            )
+        expected_treatment = _TREATMENT_BY_RQ_AND_ARM[(item.rq_id, item.arm)]
+        if item.treatment != expected_treatment:
+            raise ExperimentContractError(
+                "ARM_TREATMENT_MISMATCH: paired block violates its "
+                "RQ-arm-treatment mapping"
+            )
 
 
 @dataclasses.dataclass(frozen=True)
