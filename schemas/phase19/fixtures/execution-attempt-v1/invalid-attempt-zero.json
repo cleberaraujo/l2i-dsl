@@ -1,0 +1,1 @@
+{"base":"valid-materialized-attempt.json","expected_error":"INVALID_ATTEMPT_RECORD","mutation":{"operation":"replace","path":"/attempt/attempt_number","value":0},"valid":false}

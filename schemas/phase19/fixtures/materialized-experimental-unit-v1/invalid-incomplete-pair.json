@@ -1,0 +1,1 @@
+{"base":"valid-pilot-rq3-s1-mock-ab.json","expected_error":"INVALID_MATERIALIZED_UNIT","mutation":{"operation":"remove","path":"/unit/slots/1"},"valid":false}
