@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://l2i.local/schemas/phase19/execution-plan-v1.schema.json",
+  "title": "L2I Phase 19 deterministic execution plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "execution_plan_id",
+    "randomization_manifest_sha256",
+    "randomization_manifest",
+    "randomization_manifest_id",
+    "repository_commit",
+    "campaign_id",
+    "campaign_stage",
+    "rq_id",
+    "scenario_id",
+    "backend_mode",
+    "expansion",
+    "total_block_count",
+    "total_run_slot_count",
+    "run_slots"
+  ],
+  "properties": {
+    "contract_version": {"const": "phase19-execution-plan-v1"},
+    "execution_plan_id": {
+      "type": "string",
+      "pattern": "^execution-plan-[0-9a-f]{64}$"
+    },
+    "randomization_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "randomization_manifest": {
+      "type": "object",
+      "description": "Opaque envelope validated exclusively by the certified randomization-manifest-v1 validator."
+    },
+    "randomization_manifest_id": {"$ref": "#/$defs/identifier"},
+    "repository_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "campaign_id": {"$ref": "#/$defs/identifier"},
+    "campaign_stage": {"enum": ["foundation", "pilot", "confirmatory"]},
+    "rq_id": {"enum": ["RQ3", "RQ4"]},
+    "scenario_id": {"$ref": "#/$defs/identifier"},
+    "backend_mode": {"enum": ["mock", "real"]},
+    "expansion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm_id", "periods_per_block"],
+      "properties": {
+        "algorithm_id": {"const": "two-period-paired-block-expansion-v1"},
+        "periods_per_block": {"const": 2}
+      }
+    },
+    "total_block_count": {"type": "integer", "minimum": 1},
+    "total_run_slot_count": {"type": "integer", "minimum": 2},
+    "run_slots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/runSlot"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "executionRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "profile_id", "backend_mode"],
+      "properties": {
+        "scenario_id": {"$ref": "#/$defs/identifier"},
+        "profile_id": {"$ref": "#/$defs/identifier"},
+        "backend_mode": {"enum": ["mock", "real"]}
+      }
+    },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "campaign_id",
+        "campaign_stage",
+        "rq_id",
+        "configuration_id",
+        "arm",
+        "treatment",
+        "block_id",
+        "block_index",
+        "period",
+        "order",
+        "randomization_manifest_sha256"
+      ],
+      "properties": {
+        "campaign_id": {"$ref": "#/$defs/identifier"},
+        "campaign_stage": {"enum": ["foundation", "pilot", "confirmatory"]},
+        "rq_id": {"enum": ["RQ3", "RQ4"]},
+        "configuration_id": {"$ref": "#/$defs/identifier"},
+        "arm": {"enum": ["A", "B"]},
+        "treatment": {
+          "enum": ["baseline", "adapt", "observation_only", "selective_assurance"]
+        },
+        "block_id": {"$ref": "#/$defs/identifier"},
+        "block_index": {"type": "integer", "minimum": 1},
+        "period": {"enum": [1, 2]},
+        "order": {"enum": ["AB", "BA"]},
+        "randomization_manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "runSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot_index",
+        "run_slot_id",
+        "block_sequence_index",
+        "execution_requirements",
+        "assignment"
+      ],
+      "properties": {
+        "slot_index": {"type": "integer", "minimum": 1},
+        "run_slot_id": {
+          "type": "string",
+          "pattern": "^run-slot-[0-9a-f]{64}$"
+        },
+        "block_sequence_index": {"type": "integer", "minimum": 1},
+        "execution_requirements": {"$ref": "#/$defs/executionRequirements"},
+        "assignment": {"$ref": "#/$defs/assignment"}
+      }
+    }
+  }
+}

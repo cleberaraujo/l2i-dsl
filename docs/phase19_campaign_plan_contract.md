@@ -12,6 +12,11 @@ periods and does not define an execution plan, run slots, `run_slot_id`,
 `execution_id`, attempts, retries, traffic, results, or analysis. The manifest
 also contains no timestamps.
 
+Phase 19.7B-2b subsequently defines the additive
+`phase19-execution-plan-v1` contract. It embeds a complete validated manifest
+and expands each block into two deterministic, contiguous run slots without
+changing this randomization-manifest contract.
+
 ## Declarative request and persisted manifest
 
 The materializer input is a

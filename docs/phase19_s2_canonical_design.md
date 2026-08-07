@@ -95,3 +95,8 @@ configuration/source catalog, balanced `AB`/`BA` assignment, and deterministic
 global block ordering. Its SHA-256 is computed externally, and the manifest
 contains no periods, execution plan, slots, `execution_id`, attempts, results,
 or timestamps. Those execution-layer concepts are still not defined here.
+
+Phase 19.7B-2b subsequently defines preregistered period assignments and run
+slots in the additive `phase19-execution-plan-v1` contract. Physical
+`execution_id` allocation, attempt records, retries, execution, results, and
+runner integration remain outside that planning contract.
