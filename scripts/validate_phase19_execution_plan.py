@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -127,6 +128,15 @@ def _valid_plan_checks(plan: dict[str, Any]) -> None:
     rebuilt = materialize_execution_plan_v1(plan["randomization_manifest"])
     _require("VALID_RECONSTRUCTION", canonical_json_bytes(rebuilt) == canonical_json_bytes(plan))
     manifest_hash = sha256_json(plan["randomization_manifest"])
+    _require(
+        "SCENARIO_SPEC_PROPAGATED",
+        sum(
+            source["role"] == "scenario_spec"
+            for configuration in plan["randomization_manifest"]["configurations"]
+            for source in configuration["source_artifacts"]
+        )
+        == 1,
+    )
     _require("INDEPENDENT_MANIFEST_SHA256", plan["randomization_manifest_sha256"] == manifest_hash)
     _require("INDEPENDENT_EXECUTION_PLAN_ID", plan["execution_plan_id"] == _independent_plan_id(manifest_hash))
     _require(
@@ -144,6 +154,48 @@ def _valid_plan_checks(plan: dict[str, Any]) -> None:
     _require(
         "CANONICAL_SLOT_INDEX",
         all(slot["slot_index"] == position for position, slot in enumerate(plan["run_slots"], start=1)),
+    )
+
+
+def _exercise_source_role_binding(fixtures_path: Path) -> None:
+    fixture = json.loads(
+        (fixtures_path / "valid-pilot-rq4-mock-multiconfiguration.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    original = fixture["plan"]
+    changed_manifest = copy.deepcopy(original["randomization_manifest"])
+    sources = next(
+        configuration["source_artifacts"]
+        for configuration in changed_manifest["configurations"]
+        if len(configuration["source_artifacts"]) > 1
+    )
+    scenario_spec = next(source for source in sources if source["role"] == "scenario_spec")
+    auxiliary = next(source for source in sources if source["role"] != "scenario_spec")
+    scenario_spec["role"], auxiliary["role"] = auxiliary["role"], scenario_spec["role"]
+
+    rebuilt = materialize_execution_plan_v1(changed_manifest)
+    _require(
+        "SOURCE_ROLE_COPIED_WITHOUT_REINTERPRETATION",
+        rebuilt["randomization_manifest"]["configurations"]
+        == changed_manifest["configurations"],
+    )
+    _require(
+        "SOURCE_ROLE_PARTICIPATES_IN_PLAN_HASH",
+        sha256_json(rebuilt) != sha256_json(original),
+    )
+
+    mismatched = copy.deepcopy(original)
+    mismatched["randomization_manifest"] = changed_manifest
+    try:
+        validate_execution_plan_v1(mismatched)
+    except ExperimentContractError as exc:
+        observed = _code(str(exc))
+    else:
+        observed = None
+    _require(
+        "SOURCE_ROLE_DIVERGENCE_REJECTED",
+        observed == "RANDOMIZATION_MANIFEST_SHA256_MISMATCH",
     )
 
 
@@ -212,6 +264,7 @@ def validate_fixtures() -> None:
     _require("VALID_FIXTURE_COUNT", valid_count == VALID_FIXTURE_COUNT)
     _require("INVALID_FIXTURE_COUNT", invalid_count == INVALID_FIXTURE_COUNT)
     _require("TOTAL_FIXTURE_COUNT", len(paths) == VALID_FIXTURE_COUNT + INVALID_FIXTURE_COUNT)
+    _exercise_source_role_binding(fixtures_path)
 
     synthetic_path = fixtures_path / "valid-synthetic-confirmatory-rq4-real-50-blocks.json"
     synthetic = json.loads(synthetic_path.read_text(encoding="utf-8"))["plan"]

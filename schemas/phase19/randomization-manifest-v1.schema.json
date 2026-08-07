@@ -60,6 +60,25 @@
     "configurations": {
       "type": "array",
       "minItems": 1,
+      "contains": {
+        "type": "object",
+        "required": ["source_artifacts"],
+        "properties": {
+          "source_artifacts": {
+            "contains": {
+              "type": "object",
+              "required": ["role"],
+              "properties": {
+                "role": {"const": "scenario_spec"}
+              }
+            },
+            "minContains": 1,
+            "maxContains": 1
+          }
+        }
+      },
+      "minContains": 1,
+      "maxContains": 1,
       "items": {
         "$ref": "#/$defs/configuration"
       }
@@ -107,8 +126,12 @@
     "sourceArtifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256"],
+      "required": ["role", "path", "sha256"],
       "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$"
+        },
         "path": {
           "type": "string",
           "minLength": 1,
@@ -143,6 +166,15 @@
         "source_artifacts": {
           "type": "array",
           "minItems": 1,
+          "contains": {
+            "type": "object",
+            "required": ["role"],
+            "properties": {
+              "role": {"const": "scenario_spec"}
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1,
           "items": {
             "$ref": "#/$defs/sourceArtifact"
           }

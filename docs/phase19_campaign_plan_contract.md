@@ -27,9 +27,15 @@ one configuration.
 
 Each configuration binds a safe `configuration_id` to a safe `profile_id`, an
 even `block_count` of at least two, and a nonempty set of source artifacts.
-Each source has a relative POSIX path and a lowercase SHA-256. Absolute paths,
-backslashes, empty path segments, `.` and `..` are forbidden. Configuration
-identifiers and paths within one configuration are unique.
+Each source has a semantic `role`, a relative POSIX path, and a lowercase
+SHA-256. A role is a stable, nonempty lower-snake-case identifier. Every
+manifest contains exactly one source whose reserved role is
+`scenario_spec`; that artifact's `(path, sha256)` pair is the normative
+scenario specification. Other roles are auxiliary and acquire no runtime
+meaning without an explicit contract evolution. Absolute paths, backslashes,
+empty path segments, `.` and `..` are forbidden. Configuration identifiers
+and paths within one configuration are unique. Source position, filename,
+extension, directory, and `scenario_id` never select the scenario spec.
 
 The request is not persisted as the manifest. The materializer emits only
 `phase19-randomization-manifest-v1`, including:
@@ -41,8 +47,10 @@ The request is not persisted as the manifest. The materializer emits only
 - the deterministic block sequence.
 
 The configuration catalog is sorted by `configuration_id`. Sources are sorted
-by `path`, then by `sha256`. Consequently, semantically equivalent request
-ordering produces identical canonical content.
+by `path`, then by `sha256`, then by `role`. Consequently, semantically
+equivalent request ordering produces identical canonical content. Sorting is
+only a canonicalization rule and gives no semantic authority to array
+position.
 
 Foundation and pilot manifests may select `mock` or `real`. Confirmatory
 manifests require `real`, with no fallback to `mock`.
@@ -119,9 +127,11 @@ field represents a period; period expansion belongs to Phase 19.7B-2b.
 ## Frozen catalog and external integrity
 
 The manifest freezes the repository commit, profiles, block counts, source
-paths, and source SHA-256 values used to define the randomized campaign.
-Changing any of them creates different canonical content and must be treated
-as a different frozen declaration.
+roles, paths, and source SHA-256 values used to define the randomized
+campaign. Changing any of them creates different canonical content and must
+be treated as a different frozen declaration. In particular, `role`
+participates in the complete manifest preimage and therefore in its external
+SHA-256.
 
 The manifest has no self-hash. In particular, it cannot contain
 `manifest_sha256` or `randomization_manifest_sha256`. External consumers
@@ -138,6 +148,24 @@ no force-overwrite mode.
 
 The manifest is preregistration input, not execution output. Results,
 observations, `execution_id`, slots, attempts, and timestamps are prohibited.
+
+This mandatory role binding is a pre-activation correction to V1. The
+contract had not been activated for a campaign when the ambiguity was found;
+tracked V1 objects were contract fixtures or structural evidence, not
+executed campaign declarations. Earlier objects without `role` are invalid
+for execution, and their hashes must not be reused. The runtime adapter still
+requires separate remediation and certification. `CAMPAIGN_EXECUTION_READY`
+remains `False`.
+
+This amendment closes only the normative `scenario_spec` binding. The runtime
+adapter remains outside this contract-patch certification, and no experimental
+campaign is authorized. This documentation-only remediation does not change:
+
+```text
+ADAPTER_PATCH_CERTIFIED=False
+ADAPTER_IMPLEMENTATION_READY=False
+CAMPAIGN_EXECUTION_READY=False
+```
 
 ## Future confirmatory interpretation
 

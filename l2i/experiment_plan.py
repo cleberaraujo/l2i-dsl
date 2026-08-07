@@ -67,7 +67,9 @@ _MANIFEST_FIELDS = frozenset(
 _CONFIGURATION_FIELDS = frozenset(
     {"configuration_id", "profile_id", "block_count", "source_artifacts"}
 )
-_SOURCE_FIELDS = frozenset({"path", "sha256"})
+_SOURCE_FIELDS = frozenset({"role", "path", "sha256"})
+_SOURCE_ROLE_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_SCENARIO_SPEC_ROLE = "scenario_spec"
 _RANDOMIZATION_FIELDS = frozenset({"algorithm_id", "seed_hex"})
 _BLOCK_FIELDS = frozenset(
     {"sequence_index", "block_id", "block_index", "configuration_id", "order"}
@@ -151,6 +153,7 @@ def _configuration_catalog(
 
     normalized: list[dict[str, Any]] = []
     seen_configuration_ids: set[str] = set()
+    scenario_spec_count = 0
     for configuration_position, raw_configuration in enumerate(configurations):
         field_name = f"configurations[{configuration_position}]"
         configuration = _object(raw_configuration, field_name)
@@ -194,6 +197,13 @@ def _configuration_catalog(
             source_name = f"{field_name}.source_artifacts[{source_position}]"
             source = _object(raw_source, source_name)
             _fields(source, _SOURCE_FIELDS, source_name)
+            role = source["role"]
+            if not isinstance(role, str) or not _SOURCE_ROLE_PATTERN.fullmatch(role):
+                _fail(
+                    "INVALID_SOURCE_ROLE",
+                    f"{source_name}.role must be a lower_snake_case identifier",
+                )
+            scenario_spec_count += role == _SCENARIO_SPEC_ROLE
             path = _source_path(source["path"], f"{source_name}.path")
             if path in seen_paths:
                 _fail(
@@ -207,9 +217,9 @@ def _configuration_catalog(
                     "INVALID_SOURCE_SHA256",
                     f"{source_name}.sha256 must be 64 lowercase hexadecimal characters",
                 )
-            sources.append({"path": path, "sha256": digest})
+            sources.append({"role": role, "path": path, "sha256": digest})
 
-        sources.sort(key=lambda item: (item["path"], item["sha256"]))
+        sources.sort(key=lambda item: (item["path"], item["sha256"], item["role"]))
         normalized.append(
             {
                 "configuration_id": configuration_id,
@@ -220,6 +230,11 @@ def _configuration_catalog(
         )
 
     normalized.sort(key=lambda item: item["configuration_id"])
+    if scenario_spec_count != 1:
+        _fail(
+            "SCENARIO_SPEC_CARDINALITY",
+            "configurations must contain exactly one scenario_spec in total",
+        )
     return normalized
 
 

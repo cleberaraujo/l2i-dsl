@@ -94,6 +94,13 @@ def _exercise_valid_manifest(manifest: dict[str, Any]) -> None:
 
     blocks = manifest["blocks"]
     configurations = manifest["configurations"]
+    scenario_specs = [
+        source
+        for configuration in configurations
+        for source in configuration["source_artifacts"]
+        if source["role"] == "scenario_spec"
+    ]
+    _require("EXACTLY_ONE_SCENARIO_SPEC", len(scenario_specs) == 1)
     for configuration in configurations:
         configuration_id = configuration["configuration_id"]
         matching = [
@@ -125,6 +132,90 @@ def _exercise_valid_manifest(manifest: dict[str, Any]) -> None:
         "REPEATED_MATERIALIZATION_DIGEST_IDENTICAL",
         randomization_manifest_sha256(first)
         == randomization_manifest_sha256(second),
+    )
+
+
+def _exercise_source_role_contract(manifest: dict[str, Any], validator: Any) -> None:
+    request = _request_from_manifest(manifest)
+
+    def observed(mutator: Any) -> str | None:
+        candidate = copy.deepcopy(request)
+        mutator(candidate["configurations"][0]["source_artifacts"])
+        try:
+            materialize_randomization_manifest_v1(candidate)
+        except ExperimentContractError as exc:
+            return _stable_error_code(str(exc))
+        return None
+
+    def schema_rejected(mutator: Any) -> bool:
+        candidate = copy.deepcopy(manifest)
+        mutator(candidate["configurations"][0]["source_artifacts"])
+        return bool(list(validator.iter_errors(candidate)))
+
+    _require(
+        "SOURCE_ROLE_REQUIRED",
+        observed(lambda sources: sources[0].pop("role")) == "MISSING_REQUIRED_FIELD",
+    )
+    _require(
+        "SCENARIO_SPEC_REQUIRED",
+        observed(lambda sources: sources[0].__setitem__("role", "auxiliary_source"))
+        == "SCENARIO_SPEC_CARDINALITY",
+    )
+    _require(
+        "SCENARIO_SPEC_UNIQUE",
+        observed(
+            lambda sources: sources.append(
+                {"role": "scenario_spec", "path": "auxiliary/source.json", "sha256": "0" * 64}
+            )
+        )
+        == "SCENARIO_SPEC_CARDINALITY",
+    )
+    _require(
+        "SOURCE_ROLE_SAFE",
+        observed(lambda sources: sources[0].__setitem__("role", "../scenario_spec"))
+        == "INVALID_SOURCE_ROLE",
+    )
+    _require(
+        "SOURCE_ROLE_REQUIRED_BY_SCHEMA",
+        schema_rejected(lambda sources: sources[0].pop("role")),
+    )
+    _require(
+        "SCENARIO_SPEC_REQUIRED_BY_SCHEMA",
+        schema_rejected(
+            lambda sources: sources[0].__setitem__("role", "auxiliary_source")
+        ),
+    )
+    _require(
+        "SCENARIO_SPEC_UNIQUE_BY_SCHEMA",
+        schema_rejected(
+            lambda sources: sources.append(
+                {"role": "scenario_spec", "path": "auxiliary/source.json", "sha256": "0" * 64}
+            )
+        ),
+    )
+    _require(
+        "SOURCE_ROLE_SAFE_BY_SCHEMA",
+        schema_rejected(
+            lambda sources: sources[0].__setitem__("role", "../scenario_spec")
+        ),
+    )
+
+    hash_request = copy.deepcopy(request)
+    configuration_sources = hash_request["configurations"][0]["source_artifacts"]
+    configuration_sources.append(
+        {"role": "auxiliary_source", "path": "auxiliary/source.json", "sha256": "0" * 64}
+    )
+    original = materialize_randomization_manifest_v1(hash_request)
+    changed_request = copy.deepcopy(hash_request)
+    changed_sources = changed_request["configurations"][0]["source_artifacts"]
+    changed_sources[0]["role"], changed_sources[1]["role"] = (
+        changed_sources[1]["role"],
+        changed_sources[0]["role"],
+    )
+    changed = materialize_randomization_manifest_v1(changed_request)
+    _require(
+        "SOURCE_ROLE_PARTICIPATES_IN_HASH",
+        randomization_manifest_sha256(original) != randomization_manifest_sha256(changed),
     )
 
 
@@ -253,6 +344,7 @@ def validate_fixtures() -> None:
 
     _require("VALID_FIXTURE_COUNT", valid_count == VALID_FIXTURE_COUNT)
     _require("INVALID_FIXTURE_COUNT", invalid_count == INVALID_FIXTURE_COUNT)
+    _exercise_source_role_contract(valid_manifests[0], validator)
     _exercise_noncanonical_block_sequence(valid_manifests)
 
     coverage = {

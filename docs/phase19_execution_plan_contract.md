@@ -14,6 +14,16 @@ external SHA-256 is recalculated with `sha256_json`; a caller-supplied digest is
 never authoritative. The execution plan also has an external canonical hash
 and contains no self-hash.
 
+The plan inherits every source artifact from the validated manifest without
+reinterpretation, including its `role`, `path`, and `sha256`. The embedded
+manifest therefore has exactly one `role = scenario_spec`, whose `(path,
+sha256)` pair is the normative scenario specification. Position,
+filename, extension, directory, and `scenario_id` are not selection
+authorities. Any divergence in role, path, or hash invalidates the embedded
+manifest or its binding. Because the full embedded manifest participates in
+both the manifest and plan preimages, changing a role changes both external
+hashes.
+
 ## Deterministic expansion
 
 Blocks retain increasing `sequence_index`. Period 1 immediately precedes
@@ -98,3 +108,20 @@ noncanonical input.
 Confirmatory plans inherit the manifest requirement for backend `real`. The
 50-block confirmatory fixture is synthetic contract evidence, not a definitive
 campaign plan.
+
+The mandatory source role is a pre-activation correction to V1: no campaign
+had activated these plan objects before the ambiguity was closed. Objects
+without `role` are not executable, and hashes derived from their earlier
+preimages cannot be reused. Runtime-adapter remediation and independent
+certification remain separate work; `CAMPAIGN_EXECUTION_READY` remains
+`False`.
+
+This amendment closes only the normative `scenario_spec` binding. The runtime
+adapter remains outside this contract-patch certification, and no experimental
+campaign is authorized. This documentation-only remediation does not change:
+
+```text
+ADAPTER_PATCH_CERTIFIED=False
+ADAPTER_IMPLEMENTATION_READY=False
+CAMPAIGN_EXECUTION_READY=False
+```
