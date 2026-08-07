@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://l2i.local/schemas/phase19/randomization-manifest-v1.schema.json",
+  "title": "L2I Phase 19 deterministic randomization manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "manifest_id",
+    "campaign_id",
+    "campaign_stage",
+    "rq_id",
+    "scenario_id",
+    "backend_mode",
+    "repository_commit",
+    "randomization",
+    "configurations",
+    "total_block_count",
+    "blocks"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "phase19-randomization-manifest-v1"
+    },
+    "manifest_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "campaign_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "campaign_stage": {
+      "enum": ["foundation", "pilot", "confirmatory"]
+    },
+    "rq_id": {
+      "enum": ["RQ3", "RQ4"]
+    },
+    "scenario_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "backend_mode": {
+      "enum": ["mock", "real"]
+    },
+    "repository_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "randomization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm_id", "seed_hex"],
+      "properties": {
+        "algorithm_id": {
+          "const": "sha256-ranked-balanced-v1"
+        },
+        "seed_hex": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "configurations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/configuration"
+      }
+    },
+    "total_block_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/block"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "campaign_stage": {
+            "const": "confirmatory"
+          }
+        },
+        "required": ["campaign_stage"]
+      },
+      "then": {
+        "properties": {
+          "backend_mode": {
+            "const": "real"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sourceArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*\\\\)[^\\u0000-\\u001f\\u007f/\\\\]+(?:/[^\\u0000-\\u001f\\u007f/\\\\]+)*$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configuration_id",
+        "profile_id",
+        "block_count",
+        "source_artifacts"
+      ],
+      "properties": {
+        "configuration_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "block_count": {
+          "type": "integer",
+          "minimum": 2,
+          "multipleOf": 2
+        },
+        "source_artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sourceArtifact"
+          }
+        }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence_index",
+        "block_id",
+        "block_index",
+        "configuration_id",
+        "order"
+      ],
+      "properties": {
+        "sequence_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "block_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "block_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "configuration_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "order": {
+          "enum": ["AB", "BA"]
+        }
+      }
+    }
+  }
+}

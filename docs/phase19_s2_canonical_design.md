@@ -7,8 +7,11 @@ assignment schema, and deterministic validation fixtures. It does not implement
 an S2 runner, traffic, assurance behavior, a campaign, or scientific analysis.
 It neither executes experiments nor confirms RQ3 or RQ4.
 
-The run plan, event, write, readback, validity, summary, and definitive
-randomization-manifest schemas are deliberately deferred to later increments.
+The run plan, event, write, readback, validity, and summary schemas are
+deliberately deferred to later increments. Phase 19.7B-2a subsequently defined
+the deterministic randomization-manifest contract that had been deferred here.
+The execution plan, period expansion, run slots, physical execution identities,
+attempts, and execution itself remain deferred to Phase 19.7B-2b or later.
 
 ## Physical identity and experimental assignment
 
@@ -82,3 +85,13 @@ overwrite protection. The v1 validator without arguments also retains its
 clean synchronized `develop` gates. Fixture validation is available only
 through the explicit `--validate-v2-fixtures` mode, which may run while the
 implementation is under review in an uncommitted worktree.
+
+## Subsequent randomization-manifest definition
+
+Phase 19.7B-2a adds the canonical
+`phase19-randomization-manifest-v1` declaration without changing this
+assignment contract. It freezes one campaign tuple, repository commit,
+configuration/source catalog, balanced `AB`/`BA` assignment, and deterministic
+global block ordering. Its SHA-256 is computed externally, and the manifest
+contains no periods, execution plan, slots, `execution_id`, attempts, results,
+or timestamps. Those execution-layer concepts are still not defined here.
