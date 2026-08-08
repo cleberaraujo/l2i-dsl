@@ -187,6 +187,14 @@ descriptors. Intermediate symlinks and unexpected component replacement fail
 closed. No check-then-open path resolution is used as the authority for a
 write.
 
+The S1 consumer preserves exact `/proc/self/fd/<FD>` arguments instead of
+resolving them to backing names. Its specification loader and opening manifest
+read the inherited sealed descriptor directly. `ExperimentRunDirectory`
+likewise retains the inherited results-directory capability when constructing
+the native S1 hierarchy and artifact paths; ordinary filesystem paths keep
+their prior normalization semantics, and absolute or traversal-bearing
+artifact names remain rejected.
+
 The sealed-spec guarantee additionally requires Linux `memfd_create`, seal
 support, and `/proc/self/fd`; the result-directory capability requires
 `O_NOFOLLOW`, `O_DIRECTORY`, descriptor inheritance, and `/proc/self/fd`.

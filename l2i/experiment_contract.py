@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 
 _EXECUTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_PROC_SELF_FD_PATTERN = re.compile(r"^/proc/self/fd/[0-9]+$")
 _MODE_VALUES = frozenset({"baseline", "adapt"})
 _BACKEND_MODE_VALUES = frozenset({"mock", "real"})
 _CAMPAIGN_STAGE_VALUES = frozenset({"foundation", "pilot", "confirmatory"})
@@ -46,6 +47,15 @@ _ARM_BY_ORDER_AND_PERIOD = {
 
 class ExperimentContractError(RuntimeError):
     """Raised when an experiment violates the canonical persistence contract."""
+
+
+def normalize_open_path(path: Path) -> Path:
+    """Normalize ordinary paths while preserving an inherited Linux FD path."""
+
+    expanded = Path(path).expanduser()
+    if _PROC_SELF_FD_PATTERN.fullmatch(str(expanded)):
+        return expanded
+    return expanded.resolve()
 
 
 def utc_now() -> dt.datetime:
@@ -509,7 +519,7 @@ class ExperimentRunDirectory:
     ) -> "ExperimentRunDirectory":
         """Create a new execution directory and refuse silent overwrites."""
 
-        normalized_root = root.expanduser().resolve()
+        normalized_root = normalize_open_path(root)
         normalized_root.mkdir(parents=True, exist_ok=True)
         path = normalized_root / identity.scenario_id / identity.execution_id
         try:
@@ -521,16 +531,24 @@ class ExperimentRunDirectory:
         return cls(root=normalized_root, path=path)
 
     def artifact(self, relative_name: str) -> Path:
-        """Resolve a relative artifact path without allowing directory escape."""
+        """Construct a relative artifact path without discarding FD authority."""
 
-        candidate = (self.path / relative_name).resolve()
+        relative = Path(relative_name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ExperimentContractError(
+                f"artifact path escapes execution directory: {relative_name!r}"
+            )
+        candidate = self.path / relative
+        if _PROC_SELF_FD_PATTERN.fullmatch(str(self.root)):
+            return candidate
+        resolved = candidate.resolve()
         try:
-            candidate.relative_to(self.path.resolve())
+            resolved.relative_to(self.path.resolve())
         except ValueError as exc:
             raise ExperimentContractError(
                 f"artifact path escapes execution directory: {relative_name!r}"
             ) from exc
-        return candidate
+        return resolved
 
 
 def build_run_manifest(
@@ -549,7 +567,7 @@ def build_run_manifest(
     provenance fields after traffic generation begins.
     """
 
-    spec_path = specification_path.expanduser().resolve()
+    spec_path = normalize_open_path(specification_path)
     if not spec_path.is_file():
         raise ExperimentContractError(f"specification does not exist: {spec_path}")
 

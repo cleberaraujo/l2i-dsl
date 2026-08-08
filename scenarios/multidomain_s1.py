@@ -41,6 +41,7 @@ from l2i.experiment_contract import (
     atomic_write_text,
     build_run_manifest,
     generate_execution_id,
+    normalize_open_path,
     sha256_file,
     utc_now,
     utc_rfc3339,
@@ -181,7 +182,7 @@ def _unit_interval_float(value: Any, label: str) -> float:
 def _load_specification(path: Path) -> Tuple[Dict[str, Any], S1Intent]:
     """Load and validate the canonical S1 syntax without legacy fallback."""
 
-    resolved = path.expanduser().resolve()
+    resolved = normalize_open_path(path)
     if not resolved.is_file():
         raise S1ExecutionError(f"specification does not exist: {resolved}")
     try:
@@ -1624,7 +1625,7 @@ def execute(args: argparse.Namespace) -> Path:
     started_at = utc_now()
 
     parse_started = time.perf_counter()
-    specification_path = Path(args.spec).expanduser().resolve()
+    specification_path = normalize_open_path(Path(args.spec))
     specification, intent = _load_specification(specification_path)
     _validate_arguments(args, intent)
     parse_ms = (time.perf_counter() - parse_started) * 1000.0
