@@ -91,7 +91,94 @@ def assignment_from_plan(plan:Any,run_slot_id:str)->dict[str,Any]:
     matches=[s for s in plan["run_slots"] if s["run_slot_id"]==run_slot_id]
     if len(matches)!=1: fail("UNKNOWN_RUN_SLOT","external slot has no authority")
     assignment=matches[0]["assignment"]; ExperimentAssignmentV2(**assignment); return copy.deepcopy(assignment)
-def execute_qualification(*,fixture:Mapping[str,Any],mode:str,backend:str,profile:str,repetition:int,execution_id:str|None,results_root:Path,repository:Path)->Path:
+def _gate(*, applicable: bool, passed: bool | None, evidence: Any) -> dict[str, Any]:
+    """Build a gate without representing non-applicability as approval."""
+    if not applicable and passed is not None:
+        fail("INVALID_GATE", "a non-applicable gate cannot have a pass result")
+    if applicable and not isinstance(passed, bool):
+        fail("INVALID_GATE", "an applicable gate requires a boolean result")
+    return {"applicable": applicable, "passed": passed, "evidence": evidence}
+
+
+def validate_summary_consistency(summary: Mapping[str, Any]) -> None:
+    """Reject summaries whose gates contradict events or readbacks."""
+    mode = summary.get("rq4_assurance_mode")
+    gates = summary.get("gates")
+    writes = summary.get("post_fault_writes")
+    readbacks = summary.get("readbacks")
+    detected = summary.get("detected_domains")
+    if mode not in RQ4_MODES or not isinstance(gates, dict):
+        fail("CONTRADICTORY_SUMMARY", "mode or gates")
+    if not isinstance(writes, list) or not isinstance(readbacks, dict) or not isinstance(detected, list):
+        fail("CONTRADICTORY_SUMMARY", "events or readbacks")
+    required = {
+        "initial_state_materialized", "drift_detected", "classification_exact",
+        "unaffected_domains_preserved", "zero_post_fault_writes",
+        "selective_write_scope", "convergence_confirmed", "retry_bounded",
+        "post_cleanup_restoration_confirmed",
+    }
+    if set(gates) != required:
+        fail("CONTRADICTORY_SUMMARY", "unknown or missing gates")
+    for name, gate in gates.items():
+        if not isinstance(gate, dict) or set(gate) != {"applicable", "passed", "evidence"}:
+            fail("CONTRADICTORY_SUMMARY", f"malformed gate: {name}")
+        if gate["applicable"] is False and gate["passed"] is not None:
+            fail("CONTRADICTORY_SUMMARY", f"non-applicable gate approved: {name}")
+        if gate["applicable"] is True and not isinstance(gate["passed"], bool):
+            fail("CONTRADICTORY_SUMMARY", f"applicable gate has no result: {name}")
+    zero = gates["zero_post_fault_writes"]
+    scope = gates["selective_write_scope"]
+    convergence = gates["convergence_confirmed"]
+    desired = readbacks.get("desired")
+    initial = readbacks.get("initial")
+    post_fault = readbacks.get("post_fault")
+    post_cleanup = readbacks.get("post_cleanup")
+    if not all(isinstance(value, dict) for value in (desired, initial, post_fault, post_cleanup)):
+        fail("CONTRADICTORY_SUMMARY", "missing state readback")
+    derived_detected = [domain for domain in DOMAINS if post_fault.get(domain) != desired.get(domain)]
+    if detected != derived_detected:
+        fail("CONTRADICTORY_SUMMARY", "detected domains disagree with readback")
+    if gates["initial_state_materialized"]["passed"] != (initial == desired):
+        fail("CONTRADICTORY_SUMMARY", "initial materialization gate")
+    if gates["drift_detected"]["passed"] != bool(derived_detected):
+        fail("CONTRADICTORY_SUMMARY", "drift detection gate")
+    expected = gates["classification_exact"]["evidence"].get("expected_domains")
+    if gates["classification_exact"]["passed"] != (set(detected) == set(expected or ())):
+        fail("CONTRADICTORY_SUMMARY", "classification gate")
+    unaffected = [domain for domain in DOMAINS if domain not in detected]
+    if gates["unaffected_domains_preserved"]["passed"] != all(readbacks.get("pre_cleanup", {}).get(domain) == desired.get(domain) for domain in unaffected):
+        fail("CONTRADICTORY_SUMMARY", "unaffected-domain gate")
+    if gates["post_cleanup_restoration_confirmed"]["passed"] != (post_cleanup == desired):
+        fail("CONTRADICTORY_SUMMARY", "cleanup restoration gate")
+    if mode == "observation_only":
+        if zero != _gate(applicable=True, passed=not writes, evidence={"post_fault_write_count": len(writes)}):
+            fail("CONTRADICTORY_SUMMARY", "observation write gate")
+        if any(gates[name]["applicable"] for name in ("selective_write_scope", "convergence_confirmed", "retry_bounded")):
+            fail("CONTRADICTORY_SUMMARY", "selective gates applied to observation")
+        if readbacks.get("pre_cleanup") == readbacks.get("desired"):
+            fail("CONTRADICTORY_SUMMARY", "observation incorrectly reconverged during window")
+    else:
+        if zero["applicable"] or zero["passed"] is not None:
+            fail("CONTRADICTORY_SUMMARY", "zero-write gate applied to selective assurance")
+        if not all(gates[name]["applicable"] for name in ("selective_write_scope", "convergence_confirmed", "retry_bounded")):
+            fail("CONTRADICTORY_SUMMARY", "selective gate not applicable")
+        write_domains = [entry.get("domain") for entry in writes]
+        if scope["passed"] != (set(write_domains) == set(detected) and len(write_domains) == len(set(write_domains))):
+            fail("CONTRADICTORY_SUMMARY", "selective write scope")
+        if convergence["passed"] != (readbacks.get("pre_cleanup") == readbacks.get("desired")):
+            fail("CONTRADICTORY_SUMMARY", "pre-cleanup convergence")
+        attempts = summary.get("remediation_attempts")
+        if not isinstance(attempts, list):
+            fail("CONTRADICTORY_SUMMARY", "remediation attempts")
+        bounded = all(isinstance(item, dict) and isinstance(item.get("attempt"), int) and item["attempt"] <= 2 for item in attempts)
+        if gates["retry_bounded"]["passed"] != bounded:
+            fail("CONTRADICTORY_SUMMARY", "retry bound gate")
+        if not writes:
+            fail("CONTRADICTORY_SUMMARY", "selective assurance recorded no remediation")
+
+
+def execute_qualification(*,fixture:Mapping[str,Any],mode:str,backend:str,profile:str,repetition:int,execution_id:str|None,results_root:Path,repository:Path,
+                          crash_at: str | None = None, cleanup_succeeds: bool = True)->Path:
     if mode not in RQ4_MODES: fail("UNSUPPORTED_RQ4_MODE","no fallback")
     if backend not in {"mock","real"}: fail("UNSUPPORTED_BACKEND",backend)
     _identifier(profile,"profile")
@@ -106,8 +193,19 @@ def execute_qualification(*,fixture:Mapping[str,Any],mode:str,backend:str,profil
     manifest={"contract_version":"phase4r-s2-canonical-run-v1","identity":{"execution_id":eid,"profile":profile,"backend":backend,"repetition":repetition},
       "execution_mode":"adapt","rq4_assurance_mode":mode,"fixture":normalized,"fixture_sha256":sha256_json(normalized),"desired_state_sha256":sha256_json(desired),
       "provenance_pre":pre,"QUALIFICATION_ONLY":True,"SCIENTIFIC_RESULT":False,"CAMPAIGN_MEMBER":False}
+    if crash_at not in {None, "before_running", "after_running"}:
+        fail("INVALID_CRASH_POINT", str(crash_at))
+    if not isinstance(cleanup_succeeds, bool):
+        fail("INVALID_CLEANUP_CONTROL", "boolean required")
     manifest_path=_atomic_json(run,"manifest.json",manifest)
-    attempt={"state":"RUNNING","running_at_utc":utc_rfc3339(),"execution_id":eid}; _atomic_json(run,"attempt.json",attempt)
+    attempt={"state":"MATERIALIZED","materialized_at_utc":utc_rfc3339(),"execution_id":eid}
+    _atomic_json(run,"attempt.json",attempt)
+    if crash_at == "before_running":
+        fail("INJECTED_CRASH_BEFORE_RUNNING", str(run))
+    attempt.update({"state":"RUNNING","running_at_utc":utc_rfc3339()})
+    _atomic_json(run,"attempt.json",attempt,replace=True)
+    if crash_at == "after_running":
+        fail("INJECTED_CRASH_AFTER_RUNNING", str(run))
     # Independent injector changes only observed state and never invokes assurance.
     for domain in normalized["fault_domains"]: observed[domain]={"phase4r_drift":True}
     post_fault_snapshot=copy.deepcopy(observed); detected=[d for d in DOMAINS if observed[d]!=desired[d]]
@@ -118,14 +216,27 @@ def execute_qualification(*,fixture:Mapping[str,Any],mode:str,backend:str,profil
             if normalized["reject_first_remediation"]: retries.append({"domain":domain,"attempt":1,"result":"synthetic_rejection"}); number=2
             observed[domain]=copy.deepcopy(desired[domain]); writes.append({"domain":domain,"component":"declarative_state"}); retries.append({"domain":domain,"attempt":number,"result":"applied"})
     unaffected=[d for d in DOMAINS if d not in detected]
-    gates={"initial_state_materialized":True,"drift_detected":set(detected)==set(normalized["fault_domains"]),"classification_exact":set(detected)==set(normalized["fault_domains"]),
-      "unaffected_domains_preserved":all(observed[d]==desired[d] for d in unaffected),"zero_post_fault_writes":mode!="observation_only" or not writes,
-      "selective_write_scope":mode!="selective_assurance" or {x["domain"] for x in writes}==set(detected),"convergence_confirmed":mode=="observation_only" or observed==desired,
-      "retry_bounded":all(x["attempt"]<=2 for x in retries)}
-    observed=copy.deepcopy(desired); gates["cleanup_approved"]=observed==desired; success=all(gates.values())
+    pre_cleanup=copy.deepcopy(observed)
+    exact=set(detected)==set(normalized["fault_domains"])
+    write_domains=[x["domain"] for x in writes]
+    gates={
+      "initial_state_materialized":_gate(applicable=True,passed=True,evidence={"desired_state_sha256":sha256_json(desired)}),
+      "drift_detected":_gate(applicable=True,passed=exact,evidence={"detected_domains":detected}),
+      "classification_exact":_gate(applicable=True,passed=exact,evidence={"expected_domains":normalized["fault_domains"],"detected_domains":detected}),
+      "unaffected_domains_preserved":_gate(applicable=True,passed=all(pre_cleanup[d]==desired[d] for d in unaffected),evidence={"unaffected_domains":unaffected}),
+      "zero_post_fault_writes":_gate(applicable=mode=="observation_only",passed=not writes if mode=="observation_only" else None,evidence={"post_fault_write_count":len(writes)}),
+      "selective_write_scope":_gate(applicable=mode=="selective_assurance",passed=(set(write_domains)==set(detected) and len(write_domains)==len(set(write_domains))) if mode=="selective_assurance" else None,evidence={"detected_domains":detected,"written_domains":write_domains}),
+      "convergence_confirmed":_gate(applicable=mode=="selective_assurance",passed=pre_cleanup==desired if mode=="selective_assurance" else None,evidence={"readback":"pre_cleanup"}),
+      "retry_bounded":_gate(applicable=mode=="selective_assurance",passed=all(x["attempt"]<=2 for x in retries) if mode=="selective_assurance" else None,evidence={"maximum_attempt":max((x["attempt"] for x in retries),default=None),"limit":2}),
+    }
+    if cleanup_succeeds:
+        observed=copy.deepcopy(desired)
+    gates["post_cleanup_restoration_confirmed"]=_gate(applicable=True,passed=observed==desired,evidence={"readback":"post_cleanup"})
+    success=all(gate["passed"] is True for gate in gates.values() if gate["applicable"])
     summary={"run_status":"completed" if success else "failed","execution_mode":"adapt","rq4_assurance_mode":mode,"detected_domains":detected,"post_fault_writes":writes,
-      "remediation_attempts":retries,"gates":gates,"readbacks":{"initial":desired,"post_fault":post_fault_snapshot,"post_cleanup":observed},
+      "remediation_attempts":retries,"gates":gates,"readbacks":{"desired":desired,"initial":desired,"post_fault":post_fault_snapshot,"pre_cleanup":pre_cleanup,"post_cleanup":observed},
       "provenance_pre":pre,"provenance_post":capture_provenance(repository),"QUALIFICATION_ONLY":True,"SCIENTIFIC_RESULT":False,"CAMPAIGN_MEMBER":False}
+    validate_summary_consistency(summary)
     summary_path=_atomic_json(run,"summary.json",summary); hashes={p.name:sha256_file(p) for p in (manifest_path,summary_path)}; _atomic_json(run,"artifact-hashes.json",hashes)
     attempt.update({"state":"SUCCEEDED" if success else "FAILED","completed_at_utc":utc_rfc3339(),"artifact_hashes":hashes}); _atomic_json(run,"attempt.json",attempt,replace=True)
     if not success: fail("QUALIFICATION_FAILED",str(gates))

@@ -117,6 +117,23 @@ divergent components, bounds retry/backoff, preserves conforming components and
 requires convergence readback. Initial materialization and final cleanup are
 outside the observation window and are not remediation.
 
+Every summary gate is a record with `applicable`, `passed`, and `evidence`.
+Non-applicable gates have `passed=null`; non-applicability is never encoded as
+success. In `observation_only`, zero post-fault writes is applicable while
+selective write scope, convergence, and remediation retry are not applicable.
+The pre-cleanup readback must retain the detected drift. In
+`selective_assurance`, zero post-fault writes is not applicable; exact selective
+write scope, bounded remediation retry, and convergence on the pre-cleanup
+readback are applicable. `post_cleanup_restoration_confirmed` is a separate
+gate in both modes and cannot establish treatment convergence.
+
+The S2 attempt record is durably `MATERIALIZED` before it can become `RUNNING`,
+and `RUNNING` is persisted before fault injection or any assurance action.
+An interrupted attempt remains in its last durable state. Its identity and
+exclusive directory cannot be reused. An execution retry is a new attempt with
+a new identity and directory; it is distinct from bounded remediation retry
+inside `selective_assurance` and cannot mutate the earlier attempt.
+
 Qualification fixtures are explicitly non-scientific and carry
 `QUALIFICATION_ONLY=True`, `SCIENTIFIC_RESULT=False`, and
 `CAMPAIGN_MEMBER=False`. They do not define a campaign fault distribution or
