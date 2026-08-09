@@ -37,7 +37,11 @@ def _open_regular_path(path: Path) -> int:
             )
             os.close(dfd)
             dfd = next_fd
-        return os.open(path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dfd)
+        return os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=dfd,
+        )
     except OSError as exc:
         fail("UNSAFE_PATH", str(exc))
     finally:
@@ -406,6 +410,8 @@ def build_parser():
 def main(argv=None):
     args=build_parser().parse_args(argv)
     try:
+        if args.backend == "real":
+            fail("REAL_BACKEND_NOT_IMPLEMENTED", "synthetic assurance harness accepts only mock")
         fixture=strict_json(args.qualification_fixture)
         if (args.plan is None)!=(args.run_slot_id is None): fail("INCOMPLETE_PLAN_BINDING","plan and slot are paired")
         plan = strict_json(args.plan) if args.plan is not None else None

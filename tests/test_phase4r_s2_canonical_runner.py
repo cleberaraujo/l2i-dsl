@@ -241,6 +241,66 @@ class S2CanonicalRunnerTests(unittest.TestCase):
             with self.assertRaises(S2RunnerError): strict_json(path)
             target=Path(td)/"target.json"; target.write_text('{}'); link=Path(td)/"link.json"; link.symlink_to(target)
             with self.assertRaises(S2RunnerError): strict_json(link)
+
+    def test_fifo_fixture_and_plan_are_rejected_promptly_without_writer(self):
+        with tempfile.TemporaryDirectory() as td:
+            base=Path(td); fixture_fifo=base/"fixture.fifo"; plan_fifo=base/"plan.fifo"
+            os.mkfifo(fixture_fifo); os.mkfifo(plan_fifo)
+            fixture_script=("from pathlib import Path; from l2i.s2_canonical_runner import strict_json; "
+                f"strict_json(Path({str(fixture_fifo)!r}))")
+            fixture_cp=subprocess.run([os.sys.executable,"-c",fixture_script],capture_output=True,text=True,timeout=1)
+            self.assertNotEqual(fixture_cp.returncode,0)
+            self.assertIn("INVALID_JSON_FILE: bounded regular file required",fixture_cp.stderr)
+            root=base/"results"
+            plan_cp=subprocess.run([os.sys.executable,"-m","scenarios.multidomain_s2","--execution-mode","adapt",
+                "--rq4-assurance-mode","observation_only","--backend","mock","--profile","p","--repetition","1",
+                "--results-root",str(root),"--qualification-fixture",str(ROOT/"config/phase4r_s2_qualification_fixture.json"),
+                "--repository",str(ROOT),"--plan",str(plan_fifo),"--run-slot-id","run-slot-"+"0"*64],
+                capture_output=True,text=True,timeout=1)
+            self.assertNotEqual(plan_cp.returncode,0)
+            self.assertIn("INVALID_JSON_FILE: bounded regular file required",plan_cp.stderr)
+            self.assertFalse(root.exists())
+
+    def test_directory_and_safe_special_file_are_rejected_as_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(S2RunnerError,"INVALID_JSON_FILE: bounded regular file required"):
+                strict_json(Path(td))
+        null=Path("/dev/null")
+        if null.exists():
+            with self.assertRaisesRegex(S2RunnerError,"INVALID_JSON_FILE: bounded regular file required"):
+                strict_json(null)
+
+    def test_regular_json_remains_readable_and_open_descriptor_defeats_replacement(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"input.json"; displaced=Path(td)/"opened.json"
+            original={"value":"authoritative"}; replacement={"value":"replacement"}
+            path.write_text(json.dumps(original))
+            original_read=os.read; replaced=False
+            def replace_then_read(fd,size):
+                nonlocal replaced
+                if not replaced:
+                    replaced=True; path.rename(displaced); path.write_text(json.dumps(replacement))
+                return original_read(fd,size)
+            with mock.patch("l2i.s2_canonical_runner.os.read",side_effect=replace_then_read):
+                self.assertEqual(strict_json(path),original)
+            self.assertEqual(json.loads(path.read_text()),replacement)
+
+    def test_real_backend_precedes_fifo_missing_fixture_and_fifo_plan_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            base=Path(td); fifo=base/"blocked.fifo"; os.mkfifo(fifo); root=base/"results"
+            common=[os.sys.executable,"-m","scenarios.multidomain_s2","--execution-mode","adapt",
+                "--rq4-assurance-mode","observation_only","--backend","real","--profile","p","--repetition","1",
+                "--results-root",str(root),"--repository",str(ROOT)]
+            invocations=(
+                common+["--qualification-fixture",str(fifo)],
+                common+["--qualification-fixture",str(base/"missing.json")],
+                common+["--qualification-fixture",str(ROOT/"config/phase4r_s2_qualification_fixture.json"),
+                    "--plan",str(fifo),"--run-slot-id","run-slot-"+"0"*64],
+            )
+            for argv in invocations:
+                cp=subprocess.run(argv,capture_output=True,text=True,timeout=1)
+                self.assertEqual(cp.returncode,2); self.assertIn("REAL_BACKEND_NOT_IMPLEMENTED",cp.stderr)
+                self.assertFalse(root.exists())
     def test_cli_rejects_cross_dimension_alias(self):
         cp=subprocess.run([os.sys.executable,"-m","scenarios.multidomain_s2","--execution-mode","adapt","--rq4-assurance-mode","baseline",
             "--backend","mock","--profile","p","--repetition","1","--results-root","/tmp/x","--qualification-fixture",str(ROOT/"config/phase4r_s2_qualification_fixture.json"),"--repository",str(ROOT)],capture_output=True,text=True)
