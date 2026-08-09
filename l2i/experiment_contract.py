@@ -139,6 +139,11 @@ def atomic_write_text(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

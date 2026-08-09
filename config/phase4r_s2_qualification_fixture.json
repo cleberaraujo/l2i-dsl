@@ -1,0 +1,14 @@
+{
+  "fixture_version": "phase4r-s2-qualification-fixture-v1",
+  "qualification_only": true,
+  "scientific_result": false,
+  "campaign_member": false,
+  "fixture_id": "phase4r-s2-domain-c-drift",
+  "fault_domains": ["C"],
+  "reject_first_remediation": true,
+  "desired_state": {
+    "A": {"component": "linux", "state": "materialized"},
+    "B": {"component": "netconf", "state": "materialized"},
+    "C": {"component": "p4runtime", "state": "materialized"}
+  }
+}

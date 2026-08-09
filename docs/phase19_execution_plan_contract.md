@@ -125,3 +125,10 @@ ADAPTER_PATCH_CERTIFIED=False
 ADAPTER_IMPLEMENTATION_READY=False
 CAMPAIGN_EXECUTION_READY=False
 ```
+
+## Phase 4R RQ4 dispatch assertion
+
+For S2/RQ4, the execution plan and embedded AssignmentV2 remain authoritative.
+A caller-supplied `run_slot_id`, mode, digest, or execution identity cannot
+change treatment. Both RQ4 treatments assert `execution_mode=adapt`; this
+infrastructure value has no treatment-selection authority.

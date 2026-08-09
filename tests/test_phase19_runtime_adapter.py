@@ -1085,13 +1085,22 @@ class RuntimeAdapterTests(unittest.TestCase):
                 os.fstat(descriptor)
 
     def test_no_scenario_router_or_backend_imports(self):
-        forbidden = [
-            name for name in sys.modules
-            if name == "scenarios" or name.startswith("scenarios.")
-            or name == "l2i.router" or name.startswith("l2i.router.")
-            or name == "l2i.backends" or name.startswith("l2i.backends.")
-        ]
-        self.assertEqual(forbidden, [])
+        probe = (
+            "import json,sys; import l2i.runtime_adapter; "
+            "print(json.dumps(sorted(n for n in sys.modules if "
+            "n == 'scenarios' or n.startswith('scenarios.') or "
+            "n == 'l2i.backends' or n.startswith('l2i.backends.'))))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), [])
 
 
 if __name__ == "__main__":

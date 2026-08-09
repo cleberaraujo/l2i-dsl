@@ -212,3 +212,17 @@ S2 integration remains deferred until a canonical S2 entry point explicitly
 accepts `observation_only` and `selective_assurance`, execution identity,
 repetition, and an exclusive results root. Those treatments must never be
 silently translated to the historical `baseline` and `adapt` modes.
+
+## Phase 4R S2/RQ4 integration
+
+The canonical S2 entry point is `scenarios.multidomain_s2`. It exposes
+`execution_mode`, `rq4_assurance_mode`, backend, profile, repetition,
+execution identity and results root as distinct fields. Planned invocations
+validate ExecutionPlan V1 and select AssignmentV2 only by its derived
+`run_slot_id`; AssignmentV2 treatment has precedence over caller assertions.
+Qualification-only invocations use no scientific slot.
+
+The S2 runner persists an exclusive manifest and durable `RUNNING` attempt
+record before fault injection, uses atomic no-follow artifact writes, produces
+summary/readbacks/hashes and Git provenance pre/post, and terminalizes the
+attempt explicitly. Baseline/adapt and unknown RQ4 modes fail without fallback.

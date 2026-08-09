@@ -875,8 +875,23 @@ def _read_json_at(directory_fd: int, filename: str) -> dict[str, Any]:
             chunks.append(chunk)
     finally:
         os.close(descriptor)
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                _fail("INVALID_ATTEMPT_JSON", f"duplicate key: {key}")
+            result[key] = item
+        return result
+
+    def reject_constant(value: str) -> NoReturn:
+        _fail("INVALID_ATTEMPT_JSON", f"non-finite constant: {value}")
+
     try:
-        value = json.loads(b"".join(chunks))
+        value = json.loads(
+            b"".join(chunks),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
     except json.JSONDecodeError as exc:
         _fail("INVALID_ATTEMPT_RECORD", str(exc))
     if not isinstance(value, dict):

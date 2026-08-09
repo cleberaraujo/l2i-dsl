@@ -100,3 +100,25 @@ Phase 19.7B-2b subsequently defines preregistered period assignments and run
 slots in the additive `phase19-execution-plan-v1` contract. Physical
 `execution_id` allocation, attempt records, retries, execution, results, and
 runner integration remain outside that planning contract.
+
+## Phase 4R normative operational freeze
+
+Phase 4R adds the single canonical entry point `python3 -m scenarios.multidomain_s2`.
+RQ4 has the independent `rq4_assurance_mode` dimension with exactly
+`observation_only` and `selective_assurance`. Both use `execution_mode=adapt`
+only as the fixed initial infrastructure state. Neither value is an alias for,
+or inferred from, RQ3 `baseline`/`adapt`.
+
+Both arms materialize identical desired state and use the same independent fault
+fixture and observation mechanism. `observation_only` detects, classifies and
+records drift without post-fault configuration writes or remediation callbacks;
+persistent drift is not treatment failure. `selective_assurance` remediates only
+divergent components, bounds retry/backoff, preserves conforming components and
+requires convergence readback. Initial materialization and final cleanup are
+outside the observation window and are not remediation.
+
+Qualification fixtures are explicitly non-scientific and carry
+`QUALIFICATION_ONLY=True`, `SCIENTIFIC_RESULT=False`, and
+`CAMPAIGN_MEMBER=False`. They do not define a campaign fault distribution or
+create scientific slots. A future campaign requires a validated plan and fault
+profile and remains fail-closed when either is absent.
