@@ -500,10 +500,13 @@ falha sintética do adaptador experimental, não uma falha observada do backend.
 O perfil completo e a delimitação das afirmações estão em
 [`profiles/s2_autonomous_assurance_profile.json`](../profiles/s2_autonomous_assurance_profile.json).
 
-## Phase 4R canonical S2 technical qualification
+## Phase 4R/4RB synthetic S2 assurance qualification
 
-The only canonical S2/RQ4 entry point is `python3 -m scenarios.multidomain_s2`.
-Its Phase 4R fixtures are technical qualification artifacts, never scientific
-campaign members. `execution_mode=adapt` is fixed for both RQ4 arms; treatment
+`python3 -m scenarios.multidomain_s2` is a synthetic S2/RQ4 assurance harness,
+not the operational S2 runner. Its fixtures are technical qualification
+artifacts, never scientific campaign members. It accepts only `backend=mock`
+and does not evidence topology, multicast, dataplane replication, real domain
+materialization, or operational parity. `execution_mode=adapt` is fixed for
+both RQ4 arms; treatment
 is expressed only by `--rq4-assurance-mode observation_only` or
 `selective_assurance`. Historical wrappers and stable5 are not authority.

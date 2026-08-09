@@ -1,9 +1,12 @@
 from __future__ import annotations
 import copy, hashlib, json, os, subprocess, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 from l2i.s2_canonical_runner import (S2RunnerError, assignment_from_plan,
+    binding_from_plan,
     execute_qualification, strict_json, validate_fixture,
     validate_summary_consistency)
+from l2i.experiment_contract import sha256_json
 ROOT=Path(__file__).resolve().parents[1]
 FIXTURE=json.loads((ROOT/"config/phase4r_s2_qualification_fixture.json").read_text())
 PLAN_FIXTURE=json.loads((ROOT/"schemas/phase19/fixtures/execution-plan-v1/valid-pilot-rq4-mock-multiconfiguration.json").read_text())["plan"]
@@ -138,6 +141,98 @@ class S2CanonicalRunnerTests(unittest.TestCase):
         first=PLAN_FIXTURE["run_slots"][0]; assignment=assignment_from_plan(PLAN_FIXTURE,first["run_slot_id"])
         self.assertEqual(assignment["treatment"],"observation_only")
         with self.assertRaises(S2RunnerError): assignment_from_plan(PLAN_FIXTURE,"run-slot-"+"0"*64)
+
+    def test_real_backend_rejected_before_run_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"results"
+            with self.assertRaisesRegex(S2RunnerError,"REAL_BACKEND_NOT_IMPLEMENTED"):
+                self.run_mode("observation_only",backend="real",root=root)
+            self.assertFalse(root.exists())
+
+    def test_cli_cannot_produce_synthetic_artifact_labeled_real(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"results"
+            cp=subprocess.run([os.sys.executable,"-m","scenarios.multidomain_s2","--execution-mode","adapt",
+                "--rq4-assurance-mode","observation_only","--backend","real","--profile","p","--repetition","1",
+                "--execution-id","S2-forbidden-real","--results-root",str(root),"--qualification-fixture",
+                str(ROOT/"config/phase4r_s2_qualification_fixture.json"),"--repository",str(ROOT)],capture_output=True,text=True)
+            self.assertNotEqual(cp.returncode,0); self.assertIn("REAL_BACKEND_NOT_IMPLEMENTED",cp.stderr)
+            self.assertFalse(root.exists())
+
+    def test_plan_binding_rejects_cli_backend_profile_treatment_and_repository(self):
+        slot=PLAN_FIXTURE["run_slots"][0]
+        provenance={"commit":PLAN_FIXTURE["repository_commit"],"tree":"a"*40,"branch":"test","worktree_clean":True}
+        cases=(
+            ({"backend":"real","profile":slot["execution_requirements"]["profile_id"],"mode":slot["assignment"]["treatment"]},"CLI_BACKEND_MISMATCH"),
+            ({"backend":"mock","profile":"wrong-profile","mode":slot["assignment"]["treatment"]},"CLI_PROFILE_MISMATCH"),
+            ({"backend":"mock","profile":slot["execution_requirements"]["profile_id"],"mode":"selective_assurance"},"ASSIGNMENT_MODE_MISMATCH"),
+        )
+        for arguments,code in cases:
+            with self.subTest(code=code),self.assertRaisesRegex(S2RunnerError,code):
+                binding_from_plan(PLAN_FIXTURE,slot["run_slot_id"],repository_provenance=provenance,**arguments)
+        with self.assertRaisesRegex(S2RunnerError,"REPOSITORY_COMMIT_MISMATCH"):
+            binding_from_plan(PLAN_FIXTURE,slot["run_slot_id"],backend="mock",profile=slot["execution_requirements"]["profile_id"],
+                mode=slot["assignment"]["treatment"],repository_provenance=dict(provenance,commit="b"*40))
+
+    def test_plan_binding_rejects_tampered_requirements_scenario_and_external_slot(self):
+        invalid_names=("invalid-execution-requirements-scenario.json","invalid-execution-requirements-backend.json")
+        slot=PLAN_FIXTURE["run_slots"][0]
+        provenance={"commit":PLAN_FIXTURE["repository_commit"]}
+        for name in invalid_names:
+            invalid=json.loads((ROOT/"schemas/phase19/fixtures/execution-plan-v1"/name).read_text())["plan"]
+            with self.subTest(name=name),self.assertRaises(Exception):
+                binding_from_plan(invalid,invalid["run_slots"][0]["run_slot_id"],backend="mock",profile="profile-c",
+                    mode="observation_only",repository_provenance=provenance)
+        with self.assertRaisesRegex(S2RunnerError,"UNKNOWN_RUN_SLOT"):
+            binding_from_plan(PLAN_FIXTURE,"run-slot-"+"0"*64,backend="mock",profile=slot["execution_requirements"]["profile_id"],
+                mode=slot["assignment"]["treatment"],repository_provenance=provenance)
+
+    def test_manifest_materializes_complete_canonical_binding(self):
+        slot=PLAN_FIXTURE["run_slots"][0]
+        provenance={"commit":PLAN_FIXTURE["repository_commit"],"tree":"a"*40,"branch":"phase4/s1-s2-technical","worktree_clean":True}
+        with tempfile.TemporaryDirectory() as td,mock.patch("l2i.s2_canonical_runner.capture_provenance",return_value=provenance):
+            summary=execute_qualification(fixture=FIXTURE,mode=slot["assignment"]["treatment"],backend="mock",
+                profile=slot["execution_requirements"]["profile_id"],repetition=1,execution_id="S2-bound",
+                results_root=Path(td)/"results",repository=ROOT,plan=PLAN_FIXTURE,run_slot_id=slot["run_slot_id"])
+            manifest=json.loads((summary.parent/"manifest.json").read_text()); binding=manifest["plan_binding"]
+            self.assertTrue(binding["applicable"])
+            self.assertEqual(binding["execution_plan_id"],PLAN_FIXTURE["execution_plan_id"])
+            self.assertEqual(binding["execution_plan_sha256"],sha256_json(PLAN_FIXTURE))
+            self.assertEqual(binding["run_slot_id"],slot["run_slot_id"])
+            self.assertEqual(binding["execution_requirements"],slot["execution_requirements"])
+            self.assertEqual(binding["assignment_v2"],slot["assignment"])
+            self.assertEqual(binding["assignment_v2_sha256"],sha256_json(slot["assignment"]))
+
+    def test_planless_qualification_is_explicitly_not_applicable(self):
+        _,summary=self.run_mode("observation_only")
+        self.assertEqual(summary["plan_binding"],{"applicable":False,"justification":"qualification_only_synthetic_fixture"})
+        self.assertEqual(summary["harness_scope"],"synthetic_assurance_qualification_only")
+        self.assertFalse(summary["operational_s2_qualification"])
+
+    def test_intermediate_symlink_fixture_and_plan_are_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            base=Path(td); real=base/"real"; real.mkdir(); intermediate=base/"via-link"; intermediate.symlink_to(real,target_is_directory=True)
+            (real/"fixture.json").write_text(json.dumps(FIXTURE)); (real/"plan.json").write_text(json.dumps(PLAN_FIXTURE))
+            for path in (intermediate/"fixture.json",intermediate/"plan.json"):
+                with self.subTest(path=path),self.assertRaisesRegex(S2RunnerError,"UNSAFE_PATH"):
+                    strict_json(path)
+
+    def test_results_root_synchronized_substitution_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"results"; root.mkdir(); displaced=Path(td)/"displaced"; replacement=Path(td)/"replacement"; replacement.mkdir()
+            def substitute(path):
+                path.rename(displaced); path.symlink_to(replacement,target_is_directory=True)
+            with self.assertRaisesRegex(S2RunnerError,"RESULTS_ROOT_SUBSTITUTED"):
+                execute_qualification(fixture=FIXTURE,mode="observation_only",backend="mock",profile="p",repetition=1,
+                    execution_id="S2-substitution",results_root=root,repository=ROOT,after_results_root_open=substitute)
+            self.assertFalse((replacement/"S2").exists()); self.assertFalse((displaced/"S2").exists())
+
+    def test_nonregular_and_non_normalized_results_roots_are_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            regular=Path(td)/"file"; regular.write_text("not a directory")
+            with self.assertRaises(S2RunnerError): self.run_mode("observation_only",root=regular)
+            with self.assertRaisesRegex(S2RunnerError,"UNSAFE_RESULTS_ROOT"):
+                self.run_mode("observation_only",root=Path(td)/"component"/".."/"escape")
     def test_strict_json_rejects_duplicates_nan_and_symlink(self):
         with tempfile.TemporaryDirectory() as td:
             path=Path(td)/"x.json"; path.write_text('{"a":1,"a":2}')

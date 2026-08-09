@@ -103,7 +103,13 @@ runner integration remain outside that planning contract.
 
 ## Phase 4R normative operational freeze
 
-Phase 4R adds the single canonical entry point `python3 -m scenarios.multidomain_s2`.
+Phase 4R/4RB adds `python3 -m scenarios.multidomain_s2` only as a synthetic
+S2/RQ4 assurance qualification harness. It is not the operational S2 runner and
+does not prove topology, source-oriented multicast, dataplane replication,
+materialization of real domains A/B/C, real qualification, or operational
+parity. Until such integration exists it accepts only `backend=mock` and rejects
+`backend=real` before reserving any results directory.
+
 RQ4 has the independent `rq4_assurance_mode` dimension with exactly
 `observation_only` and `selective_assurance`. Both use `execution_mode=adapt`
 only as the fixed initial infrastructure state. Neither value is an alias for,
@@ -139,3 +145,11 @@ Qualification fixtures are explicitly non-scientific and carry
 `CAMPAIGN_MEMBER=False`. They do not define a campaign fault distribution or
 create scientific slots. A future campaign requires a validated plan and fault
 profile and remains fail-closed when either is absent.
+
+When a validated ExecutionPlan V1 and `run_slot_id` are supplied, the harness
+binds backend, profile and treatment to the slot's execution requirements and
+AssignmentV2, checks the plan repository commit against pre-run provenance, and
+materializes the complete assignment and canonical hashes in the manifest.
+Planless synthetic qualification remains permitted only with
+`plan_binding.applicable=false` and justification
+`qualification_only_synthetic_fixture`; it cannot evidence plan precedence.
