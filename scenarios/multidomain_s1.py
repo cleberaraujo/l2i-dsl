@@ -761,6 +761,9 @@ def _apply_sensitive_overlay(
         "htb_priority": 0,
         "priority_delay_ms": delay_ms,
         "attach_priority_netem": True,
+        # P2-R10 causal contract: a fixed hard cap bounds sensitive leaf backlog.
+        # This is independent from the unchanged environmental delay value.
+        "p99_queue_limit_packets": 64,
         "idempotent_cleanup": True,
         "classifiers": [
             {

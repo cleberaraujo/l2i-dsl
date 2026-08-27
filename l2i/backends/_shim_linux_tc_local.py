@@ -1002,6 +1002,11 @@ def apply_qos(
         )
         idempotent_cleanup = _as_bool(resolved.raw.get("idempotent_cleanup"), True)
         remove_leaf_qdisc = _as_bool(resolved.raw.get("remove_leaf_qdisc"), True)
+        p99_queue_limit_raw = resolved.raw.get("p99_queue_limit_packets")
+        p99_queue_limit = (
+            int(_positive_number(p99_queue_limit_raw, "target.p99_queue_limit_packets"))
+            if p99_queue_limit_raw is not None else None
+        )
 
         if not resolved.dry_run:
             initial = _readback(runner, resolved.device)
@@ -1049,6 +1054,7 @@ def apply_qos(
                 "tc", "qdisc", "add", "dev", resolved.device,
                 "parent", class_id, "handle", _handle(class_minor),
                 "netem", "delay", _milliseconds(delay_ms),
+                *(["limit", str(p99_queue_limit)] if p99_queue_limit is not None else []),
             ], check=False, ignore_failure=True)
 
         for classifier in classifiers:
@@ -1093,6 +1099,10 @@ def apply_qos(
                     if attach_netem and delay_ms is not None
                     else True
                 ),
+                "p99_queue_limit": (
+                    p99_queue_limit is None
+                    or (f"netem {class_minor}:" in qdisc and f"limit {p99_queue_limit}" in qdisc)
+                ),
             }
             ok = all(checks.values())
 
@@ -1107,6 +1117,11 @@ def apply_qos(
                 "min_mbps": minimum,
                 "max_mbps": maximum,
                 "htb_priority": htb_priority,
+                "p99_queue_control": {
+                    "mechanism": "hard_leaf_backlog_cap",
+                    "limit_packets": p99_queue_limit,
+                    "readback": "tc qdisc netem limit",
+                },
                 "classifiers": classifiers,
             },
             "planned": _planned(

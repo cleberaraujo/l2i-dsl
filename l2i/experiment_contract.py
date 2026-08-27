@@ -197,19 +197,101 @@ def _run_git(repository: Path, arguments: Sequence[str]) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class RepositoryProvenance:
-    """Immutable Git provenance attached to every canonical execution."""
+    """Immutable Git or sealed-stage provenance for a canonical execution."""
 
     commit: str
     branch: str
     worktree_clean: bool
     origin_commit: str | None
     describe: str
+    mode: str = "GIT"
+    base_repository_head: str | None = None
+    composed_manifest_sha256: str | None = None
+    runtime_manifest_sha256: str | None = None
+    stage_manifest_sha256: str | None = None
+    matrix_sha256: str | None = None
+    lock_sha256: str | None = None
+    synthetic_git_context_used: bool = False
+    live_checkout_used: bool = True
+
+    @classmethod
+    def _capture_sealed_stage(cls, repository: Path) -> "RepositoryProvenance":
+        """Authenticate provenance from the immutable stage without invoking Git."""
+
+        attestation_value = os.environ.get("L2I_PROVENANCE_ATTESTATION", "")
+        if not attestation_value:
+            raise ExperimentContractError("sealed-stage provenance attestation is required")
+        supplied = Path(attestation_value).expanduser()
+        if not supplied.is_absolute():
+            raise ExperimentContractError("sealed-stage provenance attestation must be absolute")
+        attestation = supplied.resolve(strict=True)
+        stage = attestation.parents[1]
+        try:
+            attestation.relative_to(stage)
+            repository.resolve(strict=True).relative_to(stage)
+        except ValueError as exc:
+            raise ExperimentContractError("sealed-stage provenance path escapes stage") from exc
+        if attestation != stage / "protocol" / "sealed-stage-provenance.json":
+            raise ExperimentContractError("sealed-stage provenance attestation path is noncanonical")
+        if (stage / ".git").exists() or (repository / ".git").exists():
+            raise ExperimentContractError("synthetic Git context is forbidden in sealed mode")
+        try:
+            document = json.loads(attestation.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ExperimentContractError("sealed-stage provenance attestation is invalid") from exc
+        required = {
+            "base_repository_head": stage / "protocol" / "base-repository-head.txt",
+            "composed_manifest_sha256": stage / "source" / "composed-manifest.tsv",
+            "runtime_manifest_sha256": stage / "source" / "candidate-runtime-manifest.tsv",
+            "stage_manifest_sha256": stage / "stage-manifest.tsv",
+            "matrix_sha256": stage / "protocol" / "p3-r2-candidate-matrix.jsonl",
+            "lock_sha256": stage / "protocol" / "p3-r2-candidate-lock.json",
+        }
+        if (document.get("schema") != "phase4sc-sealed-stage-provenance-v1"
+                or document.get("mode") != "SEALED_STAGE_MANIFEST"
+                or document.get("scientific_generation") != "P3-R2"
+                or document.get("synthetic_git_context_used") is not False
+                or document.get("live_checkout_used") is not False
+                or document.get("network_used") is not False):
+            raise ExperimentContractError("sealed-stage provenance policy mismatch")
+        for field, path in required.items():
+            value = document.get(field)
+            identity_pattern = re.compile(r"^[0-9a-f]{40}$") if field == "base_repository_head" else _SHA256_PATTERN
+            if not isinstance(value, str) or not identity_pattern.fullmatch(value):
+                raise ExperimentContractError(f"sealed-stage provenance {field} is invalid")
+            if field == "base_repository_head":
+                if path.read_text(encoding="utf-8").strip() != value:
+                    raise ExperimentContractError("sealed-stage base repository head mismatch")
+            elif not path.is_file() or sha256_file(path) != value:
+                raise ExperimentContractError(f"sealed-stage provenance {field} mismatch")
+        head = document["base_repository_head"]
+        return cls(
+            commit=head,
+            branch="develop",
+            worktree_clean=True,
+            origin_commit=head,
+            describe=f"sealed-stage-manifest:{head[:12]}",
+            mode="SEALED_STAGE_MANIFEST",
+            base_repository_head=head,
+            composed_manifest_sha256=document["composed_manifest_sha256"],
+            runtime_manifest_sha256=document["runtime_manifest_sha256"],
+            stage_manifest_sha256=document["stage_manifest_sha256"],
+            matrix_sha256=document["matrix_sha256"],
+            lock_sha256=document["lock_sha256"],
+            synthetic_git_context_used=False,
+            live_checkout_used=False,
+        )
 
     @classmethod
     def capture(cls, repository: Path) -> "RepositoryProvenance":
         """Capture repository state without changing files or contacting remotes."""
 
         root = repository.resolve()
+        provenance_mode = os.environ.get("L2I_PROVENANCE_MODE", "git").strip().lower()
+        if provenance_mode == "sealed-stage-manifest":
+            return cls._capture_sealed_stage(root)
+        if provenance_mode != "git":
+            raise ExperimentContractError(f"unsupported provenance mode: {provenance_mode}")
         commit = _run_git(root, ["rev-parse", "HEAD"])
         branch = _run_git(root, ["branch", "--show-current"]) or "DETACHED"
         status = _run_git(root, ["status", "--porcelain"])
