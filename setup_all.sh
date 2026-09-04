@@ -274,7 +274,9 @@ autotools_build_install() {
 
 port_listening() {
   local port="$1"
-  ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .
+  local listeners
+  listeners="$(ss -H -ltn "sport = :$port" 2>/dev/null)" || return 2
+  [[ -n "$listeners" ]]
 }
 
 assert_system_tools() {
@@ -749,130 +751,782 @@ configure_netconf() {
   info "NETCONF configurado com usuário=$NETCONF_USER, chave=$NETCONF_KEY e módulo l2i-qos."
 }
 
-stop_netconf() {
-  local pid=""
-  local i
+NETCONF_SYSTEMD_UNIT="netopeer2-server.service"
+NETCONF_PROC_ROOT="${NETCONF_PROC_ROOT:-/proc}"
+NETCONF_STABILITY_NS=2000000000
+NETCONF_READINESS_TIMEOUT_NS=60000000000
+NETCONF_UNIT_TIMEOUT_NS=30000000000
+NETCONF_STOP_TIMEOUT_NS=10000000000
+NETCONF_RESIDUAL_PID_TIMEOUT_NS=1000000000
+NETCONF_RESIDUAL_PID_POLL_INTERVAL=0.05
+NETCONF_BOOTSTRAP_MODULES=(ietf-keystore ietf-netconf-acm ietf-netconf-server)
+declare -A NETCONF_CERTIFIED_STARTUP_SHA256=(
+  [ietf-keystore]="b44726600d70ff3b653d92c764d5bbc8a03a94dba2d5e702641639283e736f25"
+  [ietf-netconf-acm]="0a8a1b531211ecc7765e104e2a64fc8843444b1051533398990aa961a4201252"
+  [ietf-netconf-server]="48dbb26be547f3b246769f156fe007feec0cd1e545ace4e5a256352f1d7eb77b"
+)
+NETCONF_PRIMARY_ERROR=""
+NETCONF_START_ATTEMPTED=0
 
-  if [[ -f "$NETCONF_PIDFILE" ]]; then
-    pid="$(cat "$NETCONF_PIDFILE" 2>/dev/null || true)"
+netconf_fail() {
+  local code="$1"
+  shift
+  NETCONF_PRIMARY_ERROR="$*"
+  err "$NETCONF_PRIMARY_ERROR"
+  return "$code"
+}
+
+netconf_module_installed() {
+  local module="$1"
+  sudo -n sysrepoctl -l 2>/dev/null \
+    | awk -F'|' -v wanted="$module" '
+        NR > 2 {
+          name=$1; flags=$3
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+          gsub(/[[:space:]]/, "", flags)
+          if (name == wanted && flags ~ /I/) found=1
+        }
+        END { exit(found ? 0 : 1) }
+      '
+}
+
+netconf_python_ready() {
+  [[ -x "$PYTHON_BIN" ]] && "$PYTHON_BIN" -c 'import ncclient' >/dev/null 2>&1
+}
+
+netconf_snapshot() {
+  local module="$1"
+  local datastore="$2"
+  local snapshot
+  local raw_hash
+  local normalized_hash
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/l2i-netconf-snapshot.XXXXXX")" || return 1
+  if ! sudo -n sysrepocfg -X -d "$datastore" -m "$module" >"$snapshot"; then
+    rm -f -- "$snapshot"
+    return 1
   fi
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    info "Encerraria o Netopeer2 e removeria $NETCONF_PIDFILE."
-    return 0
+  raw_hash="$(sha256sum "$snapshot" | awk '{print $1}')"
+  if [[ -s "$snapshot" ]]; then
+    if ! normalized_hash="$($PYTHON_BIN -c '
+import pathlib, sys, xml.etree.ElementTree as ET
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+sys.stdout.write(ET.canonicalize(text, strip_text=True))
+' "$snapshot" | sha256sum | awk '{print $1}')"; then
+      rm -f -- "$snapshot"
+      return 1
+    fi
+  else
+    normalized_hash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   fi
+  rm -f -- "$snapshot"
+  printf '%s %s\n' "$raw_hash" "$normalized_hash"
+}
 
-  if [[ "$pid" =~ ^[0-9]+$ ]] && sudo kill -0 "$pid" 2>/dev/null; then
-    info "Encerrando Netopeer2 pelo PID file (PID=$pid)."
-    sudo kill -TERM "$pid" 2>/dev/null || true
+netconf_main_pid() {
+  systemctl show "$NETCONF_SYSTEMD_UNIT" --property=MainPID --value 2>/dev/null
+}
 
-    for ((i=1; i<=30; i++)); do
-      if ! sudo kill -0 "$pid" 2>/dev/null; then
-        break
-      fi
-      sleep 0.1
-    done
+netconf_expected_executable() {
+  local expected="${NETCONF_EXPECTED_EXECUTABLE:-}"
+  [[ -n "$expected" ]] || expected="$(command -v netopeer2-server 2>/dev/null || true)"
+  [[ -n "$expected" ]] || return 1
+  readlink -e -- "$expected" 2>/dev/null
+}
 
-    if sudo kill -0 "$pid" 2>/dev/null; then
-      warn "Netopeer2 não encerrou com SIGTERM; enviando SIGKILL."
-      sudo kill -KILL "$pid" 2>/dev/null || true
+netconf_pid_executable() {
+  local pid="${1:-}"
+  local allow_privileged="${2:-1}"
+  local pid_dir link output executable line_count total_bytes nonnul_bytes
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || return 1
+  [[ "$allow_privileged" == "0" || "$allow_privileged" == "1" ]] || return 1
+  pid_dir="$NETCONF_PROC_ROOT/$pid"
+  link="$pid_dir/exe"
+  [[ -d "$pid_dir" ]] || return 2
+  output="$(mktemp "${TMPDIR:-/tmp}/l2i-netconf-pid-exe.XXXXXX")" || return 1
+  if readlink -e -- "$link" >"$output" 2>/dev/null; then
+    :
+  elif [[ ! -d "$pid_dir" ]]; then
+    rm -f -- "$output"
+    return 2
+  elif [[ "$allow_privileged" == "0" ]]; then
+    rm -f -- "$output"
+    return 1
+  elif sudo -n readlink -f -- "$link" >"$output" 2>/dev/null; then
+    :
+  elif [[ ! -d "$pid_dir" ]]; then
+    rm -f -- "$output"
+    return 2
+  else
+    rm -f -- "$output"
+    return 1
+  fi
+  if [[ ! -d "$pid_dir" ]]; then
+    rm -f -- "$output"
+    return 2
+  fi
+  line_count="$(wc -l < "$output")"
+  total_bytes="$(wc -c < "$output")"
+  nonnul_bytes="$(LC_ALL=C tr -d '\000' < "$output" | wc -c)"
+  if [[ "$line_count" != "1" || "$total_bytes" != "$nonnul_bytes" ]]; then
+    rm -f -- "$output"
+    return 1
+  fi
+  IFS= read -r executable < "$output" || {
+    rm -f -- "$output"
+    return 1
+  }
+  rm -f -- "$output"
+  [[ -n "$executable" && "$executable" == /* && "$executable" != *$'\n'* ]] || return 1
+  printf '%s\n' "$executable"
+}
+
+netconf_unit_control_group() {
+  systemctl show "$NETCONF_SYSTEMD_UNIT" --property=ControlGroup --value 2>/dev/null
+}
+
+netconf_pid_control_group() {
+  local pid="${1:-}"
+  local hierarchy controllers group
+  [[ -r "$NETCONF_PROC_ROOT/$pid/cgroup" ]] || return 1
+  while IFS=: read -r hierarchy controllers group; do
+    [[ -n "$group" ]] || continue
+    printf '%s\n' "$group"
+  done < "$NETCONF_PROC_ROOT/$pid/cgroup"
+}
+
+netconf_pid_start_time() {
+  local pid="${1:-}"
+  local stat_line rest start_time
+  local -a stat_fields=()
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || return 1
+  [[ -r "$NETCONF_PROC_ROOT/$pid/stat" ]] || return 1
+  IFS= read -r stat_line < "$NETCONF_PROC_ROOT/$pid/stat" || return 1
+  rest="${stat_line##*) }"
+  [[ "$rest" != "$stat_line" ]] || return 1
+  read -r -a stat_fields <<< "$rest"
+  ((${#stat_fields[@]} >= 20)) || return 1
+  start_time="${stat_fields[19]}"
+  [[ "$start_time" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$start_time"
+}
+
+netconf_pid_cgroup_matches_unit() {
+  local pid="${1:-}"
+  local unit_group pid_group
+  unit_group="$(netconf_unit_control_group)" || return 1
+  [[ -n "$unit_group" && "$unit_group" != "/" ]] || return 1
+  while IFS= read -r pid_group; do
+    [[ "$pid_group" == "$unit_group" || "$pid_group" == "$unit_group/"* ]] && return 0
+  done < <(netconf_pid_control_group "$pid")
+  return 1
+}
+
+netconf_pid_matching_unit_group() {
+  local pid="${1:-}"
+  local unit_group pid_group
+  unit_group="$(netconf_unit_control_group)" || return 1
+  [[ -n "$unit_group" && "$unit_group" != "/" ]] || return 1
+  while IFS= read -r pid_group; do
+    if [[ "$pid_group" == "$unit_group" || "$pid_group" == "$unit_group/"* ]]; then
+      printf '%s\n' "$pid_group"
+      return 0
+    fi
+  done < <(netconf_pid_control_group "$pid")
+  return 1
+}
+
+netconf_process_identity() {
+  local pid="${1:-}"
+  local executable group
+  executable="$(netconf_pid_executable "$pid")" || return 1
+  group="$(netconf_pid_control_group "$pid")" || return 1
+  printf '%s|%s|%s\n' "$pid" "$executable" "$group"
+}
+
+netconf_pid_valid() {
+  local pid="${1:-}"
+  local executable expected main_pid load_state
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$pid" != "1" ]] || return 1
+  load_state="$(systemctl show "$NETCONF_SYSTEMD_UNIT" --property=LoadState --value 2>/dev/null || true)"
+  [[ "$load_state" == "loaded" ]] || return 1
+  main_pid="$(netconf_main_pid)"
+  [[ "$main_pid" == "$pid" ]] || return 1
+  sudo -n kill -0 "$pid" 2>/dev/null || return 1
+  executable="$(netconf_pid_executable "$pid")" || return 1
+  expected="$(netconf_expected_executable)" || return 1
+  [[ "${executable##*/}" == "netopeer2-server" && "$executable" == "$expected" ]] || return 1
+  netconf_pid_cgroup_matches_unit "$pid"
+}
+
+netconf_capture_process_fingerprint() {
+  local pid="${1:-}"
+  local executable group start_time
+  netconf_pid_valid "$pid" || return 1
+  executable="$(netconf_pid_executable "$pid")" || return 1
+  group="$(netconf_pid_matching_unit_group "$pid")" || return 1
+  start_time="$(netconf_pid_start_time "$pid")" || return 1
+  printf '%s\n%s\n%s\n%s\n' "$pid" "$executable" "$group" "$start_time"
+}
+
+netconf_process_fingerprint_valid() {
+  local fingerprint="${1:-}"
+  local pid executable group start_time current_executable current_start_time pid_groups pid_group
+  local -a fields=()
+  mapfile -t fields <<< "$fingerprint"
+  ((${#fields[@]} == 4)) || return 1
+  pid="${fields[0]}"
+  executable="${fields[1]}"
+  group="${fields[2]}"
+  start_time="${fields[3]}"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || return 1
+  [[ -n "$executable" && "${executable##*/}" == "netopeer2-server" ]] || return 1
+  [[ -n "$group" && "$group" != "/" && "$start_time" =~ ^[0-9]+$ ]] || return 1
+  sudo -n kill -0 "$pid" 2>/dev/null || return 1
+  current_executable="$(netconf_pid_executable "$pid")" || return 1
+  [[ "$current_executable" == "$executable" ]] || return 1
+  current_start_time="$(netconf_pid_start_time "$pid")" || return 1
+  [[ "$current_start_time" == "$start_time" ]] || return 1
+  pid_groups="$(netconf_pid_control_group "$pid")" || return 1
+  while IFS= read -r pid_group; do
+    [[ "$pid_group" == "$group" ]] && return 0
+  done <<< "$pid_groups"
+  return 1
+}
+
+netconf_unit_active_running() {
+  local active sub pid
+  active="$(systemctl show "$NETCONF_SYSTEMD_UNIT" --property=ActiveState --value 2>/dev/null || true)"
+  sub="$(systemctl show "$NETCONF_SYSTEMD_UNIT" --property=SubState --value 2>/dev/null || true)"
+  pid="$(netconf_main_pid)"
+  [[ "$active" == "active" && "$sub" == "running" ]] && netconf_pid_valid "$pid"
+}
+
+netconf_pid_kthread_state() {
+  local pid="${1:-}" pid_dir status_path status line state="" count=0
+  pid_dir="$NETCONF_PROC_ROOT/$pid"
+  status_path="$pid_dir/status"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || return 1
+
+  if status="$(cat -- "$status_path" 2>/dev/null)"; then
+    :
+  else
+    [[ ! -d "$pid_dir" ]] && return 2
+    if status="$(sudo -n cat -- "$status_path" 2>/dev/null)"; then
+      :
+    else
+      [[ ! -d "$pid_dir" ]] && return 2
+      return 1
     fi
   fi
+  [[ -d "$pid_dir" ]] || return 2
 
-  # Fallback para execuções antigas sem PID file ou com wrappers sudo.
-  sudo pkill -TERM -f '(^|/)netopeer2-server([[:space:]]|$)' 2>/dev/null || true
+  while IFS= read -r line; do
+    case "$line" in
+      $'Kthread:\t0') state=0; count=$((count + 1)) ;;
+      $'Kthread:\t1') state=1; count=$((count + 1)) ;;
+      Kthread:*) return 1 ;;
+    esac
+  done <<< "$status"
+  (( count == 1 )) || return 1
+  printf '%s\n' "$state"
+}
+
+NETCONF_RESIDUAL_ENUMERATED_COUNT=0
+NETCONF_RESIDUAL_CANONICAL_COUNT=0
+NETCONF_RESIDUAL_NONCANONICAL_COUNT=0
+NETCONF_RESIDUAL_KERNEL_THREAD_COUNT=0
+NETCONF_RESIDUAL_GONE_COUNT=0
+NETCONF_RESIDUAL_UNRESOLVED_COUNT=0
+NETCONF_RESIDUAL_REEVALUATED_PID_COUNT=0
+NETCONF_RESIDUAL_REEVALUATION_COUNT=0
+
+netconf_residual_reset_metrics() {
+  NETCONF_RESIDUAL_ENUMERATED_COUNT=0
+  NETCONF_RESIDUAL_CANONICAL_COUNT=0
+  NETCONF_RESIDUAL_NONCANONICAL_COUNT=0
+  NETCONF_RESIDUAL_KERNEL_THREAD_COUNT=0
+  NETCONF_RESIDUAL_GONE_COUNT=0
+  NETCONF_RESIDUAL_UNRESOLVED_COUNT=0
+  NETCONF_RESIDUAL_REEVALUATED_PID_COUNT=0
+  NETCONF_RESIDUAL_REEVALUATION_COUNT=0
+}
+
+netconf_residual_poll_sleep() {
+  sleep "$NETCONF_RESIDUAL_PID_POLL_INTERVAL"
+}
+
+netconf_classify_residual_pid() {
+  local pid="${1:-}" expected="${2:-}" pid_dir
+  local start_ns deadline_ns now_ns start_before="" start_after=""
+  local executable="" kthread="" status=0 attempt=0
+  pid_dir="$NETCONF_PROC_ROOT/$pid"
+  NETCONF_RESIDUAL_PID_CLASS="unresolved"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || return 0
+  [[ -n "$expected" && "$expected" == /* && "$expected" != *$'\n'* ]] || return 0
+  start_ns="$(netconf_monotonic_ns)" || return 0
+  deadline_ns=$((start_ns + NETCONF_RESIDUAL_PID_TIMEOUT_NS))
+  now_ns="$start_ns"
+
+  while :; do
+    ((now_ns <= deadline_ns)) || return 0
+    attempt=$((attempt + 1))
+    if ((attempt > 1)); then
+      NETCONF_RESIDUAL_REEVALUATION_COUNT=$((NETCONF_RESIDUAL_REEVALUATION_COUNT + 1))
+      if ((attempt == 2)); then
+        NETCONF_RESIDUAL_REEVALUATED_PID_COUNT=$((NETCONF_RESIDUAL_REEVALUATED_PID_COUNT + 1))
+      fi
+    fi
+
+    if [[ ! -d "$pid_dir" ]]; then
+      NETCONF_RESIDUAL_PID_CLASS="gone"
+      return 0
+    fi
+
+    start_before=""
+    kthread=""
+    executable=""
+    if start_before="$(netconf_pid_start_time "$pid")"; then
+      :
+    elif [[ ! -d "$pid_dir" ]]; then
+      NETCONF_RESIDUAL_PID_CLASS="gone"
+      return 0
+    fi
+
+    if kthread="$(netconf_pid_kthread_state "$pid")"; then
+      :
+    else
+      status=$?
+      if ((status == 2)) || [[ ! -d "$pid_dir" ]]; then
+        NETCONF_RESIDUAL_PID_CLASS="gone"
+        return 0
+      fi
+      kthread=""
+    fi
+
+    if executable="$(netconf_pid_executable "$pid")"; then
+      :
+    else
+      status=$?
+      if ((status == 2)) || [[ ! -d "$pid_dir" ]]; then
+        NETCONF_RESIDUAL_PID_CLASS="gone"
+        return 0
+      fi
+      executable=""
+    fi
+
+    if start_after="$(netconf_pid_start_time "$pid")"; then
+      :
+    elif [[ ! -d "$pid_dir" ]]; then
+      NETCONF_RESIDUAL_PID_CLASS="gone"
+      return 0
+    else
+      start_after=""
+    fi
+
+    if [[ ! -d "$pid_dir" ]]; then
+      NETCONF_RESIDUAL_PID_CLASS="gone"
+      return 0
+    fi
+
+    if [[ -n "$start_before" && -n "$start_after" && "$start_before" == "$start_after" ]]; then
+      if [[ "$kthread" == "1" ]]; then
+        NETCONF_RESIDUAL_PID_CLASS="kernel-thread"
+        return 0
+      fi
+      if [[ "$kthread" == "0" && -n "$executable" && "$executable" == /* \
+         && "$executable" != "$NETCONF_PROC_ROOT" \
+         && "$executable" != "$NETCONF_PROC_ROOT/"* ]]; then
+        if [[ "$executable" == "$expected" || "$executable" == "$expected (deleted)" ]]; then
+          NETCONF_RESIDUAL_PID_CLASS="canonical"
+        else
+          NETCONF_RESIDUAL_PID_CLASS="noncanonical"
+        fi
+        return 0
+      fi
+    fi
+
+    now_ns="$(netconf_monotonic_ns)" || return 0
+    ((now_ns < deadline_ns)) || return 0
+    netconf_residual_poll_sleep || return 0
+    now_ns="$(netconf_monotonic_ns)" || return 0
+  done
+}
+
+netconf_residual_pids() {
+  local expected link pid pid_dir scan_error=0
+  netconf_residual_reset_metrics
+  expected="$(netconf_expected_executable)" || return 1
+  [[ -n "$expected" && "$expected" == /* && "$expected" != *$'\n'* ]] || return 1
+  [[ -d "$NETCONF_PROC_ROOT" && -r "$NETCONF_PROC_ROOT" && -x "$NETCONF_PROC_ROOT" ]] || return 1
+  for link in "$NETCONF_PROC_ROOT"/[0-9]*/exe; do
+    [[ -e "$link" || -L "$link" ]] || continue
+    pid_dir="${link%/exe}"
+    pid="${pid_dir##*/}"
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || continue
+    NETCONF_RESIDUAL_ENUMERATED_COUNT=$((NETCONF_RESIDUAL_ENUMERATED_COUNT + 1))
+    if ! netconf_classify_residual_pid "$pid" "$expected"; then
+      NETCONF_RESIDUAL_PID_CLASS="unresolved"
+    fi
+    case "$NETCONF_RESIDUAL_PID_CLASS" in
+      canonical)
+        NETCONF_RESIDUAL_CANONICAL_COUNT=$((NETCONF_RESIDUAL_CANONICAL_COUNT + 1))
+        printf '%s\n' "$pid"
+        ;;
+      noncanonical)
+        NETCONF_RESIDUAL_NONCANONICAL_COUNT=$((NETCONF_RESIDUAL_NONCANONICAL_COUNT + 1))
+        ;;
+      kernel-thread)
+        NETCONF_RESIDUAL_KERNEL_THREAD_COUNT=$((NETCONF_RESIDUAL_KERNEL_THREAD_COUNT + 1))
+        ;;
+      gone)
+        NETCONF_RESIDUAL_GONE_COUNT=$((NETCONF_RESIDUAL_GONE_COUNT + 1))
+        ;;
+      *)
+        NETCONF_RESIDUAL_UNRESOLVED_COUNT=$((NETCONF_RESIDUAL_UNRESOLVED_COUNT + 1))
+        scan_error=1
+        ;;
+    esac
+  done
+  ((scan_error == 0))
+}
+
+netconf_monotonic_ns() {
+  "$PYTHON_BIN" -c 'import time; print(time.monotonic_ns())'
+}
+
+netconf_poll_sleep() {
   sleep 0.2
-  sudo pkill -KILL -f '(^|/)netopeer2-server([[:space:]]|$)' 2>/dev/null || true
-  sudo rm -f "$NETCONF_PIDFILE"
+}
+
+netconf_wait_unit_ready() {
+  local start_ns deadline_ns now_ns
+  start_ns="$(netconf_monotonic_ns)" || return 1
+  deadline_ns=$((start_ns + NETCONF_UNIT_TIMEOUT_NS))
+  while :; do
+    now_ns="$(netconf_monotonic_ns)" || return 1
+    (( now_ns <= deadline_ns )) || return 1
+    netconf_unit_active_running && return 0
+    netconf_poll_sleep
+  done
+}
+
+netconf_stability_gate() {
+  local start_ns deadline_ns now_ns stable_since_ns=-1
+  local pid identity stable_identity=""
+  start_ns="$(netconf_monotonic_ns)" || return 1
+  deadline_ns=$((start_ns + NETCONF_READINESS_TIMEOUT_NS))
+  while :; do
+    now_ns="$(netconf_monotonic_ns)" || return 1
+    (( now_ns <= deadline_ns )) || return 1
+    pid="$(netconf_main_pid)"
+    identity=""
+    if netconf_unit_active_running && port_listening "$NETCONF_PORT" \
+       && netconf_pid_valid "$pid"; then
+      identity="$(netconf_process_identity "$pid")" || identity=""
+    fi
+    if [[ -n "$identity" ]]; then
+      if [[ "$identity" != "$stable_identity" ]]; then
+        stable_identity="$identity"
+        stable_since_ns="$now_ns"
+      elif (( now_ns - stable_since_ns >= NETCONF_STABILITY_NS )); then
+        return 0
+      fi
+    else
+      stable_identity=""
+      stable_since_ns=-1
+    fi
+    netconf_poll_sleep
+  done
+}
+
+netconf_preflight() {
+  local module residuals
+  for module in systemctl sysrepocfg sysrepoctl ss sha256sum awk cat readlink mktemp; do
+    command -v "$module" >/dev/null 2>&1 \
+      || netconf_fail 19 "Comando obrigatório NETCONF ausente: $module" || return $?
+  done
+  netconf_expected_executable >/dev/null \
+    || netconf_fail 29 "Executável canônico Netopeer2 ausente" || return $?
+  netconf_python_ready \
+    || netconf_fail 20 "Python/venv NETCONF ou ncclient indisponível: $PYTHON_BIN" || return $?
+  id -u "$NETCONF_USER" >/dev/null 2>&1 \
+    || netconf_fail 21 "Usuário NETCONF ausente: $NETCONF_USER" || return $?
+  [[ -f "$NETCONF_KEY" && -r "$NETCONF_KEY" ]] \
+    || netconf_fail 22 "Chave NETCONF ausente ou ilegível: $NETCONF_KEY" || return $?
+  sudo -n true >/dev/null 2>&1 \
+    || netconf_fail 23 "sudo não interativo indisponível" || return $?
+  [[ "$(systemctl show "$NETCONF_SYSTEMD_UNIT" --property=LoadState --value 2>/dev/null || true)" == "loaded" ]] \
+    || netconf_fail 28 "Unidade systemd NETCONF não está carregada" || return $?
+  for module in "${NETCONF_BOOTSTRAP_MODULES[@]}" l2i-qos; do
+    netconf_module_installed "$module" \
+      || netconf_fail 24 "Módulo sysrepo obrigatório ausente: $module" || return $?
+  done
+  [[ "$(systemctl is-active "$NETCONF_SYSTEMD_UNIT" 2>/dev/null || true)" == "inactive" ]] \
+    || netconf_fail 25 "Unidade NETCONF não está inativa no preflight" || return $?
+  ! port_listening "$NETCONF_PORT" \
+    || netconf_fail 26 "Porta NETCONF já está ocupada: $NETCONF_PORT" || return $?
+  residuals="$(netconf_residual_pids 2>/dev/null)" \
+    || netconf_fail 27 "Falha ao verificar processos Netopeer2 residuais" || return $?
+  [[ -z "$residuals" ]] \
+    || netconf_fail 27 "Processo Netopeer2 residual detectado: $residuals" || return $?
+}
+
+netconf_read_only_probe() {
+  "$PYTHON_BIN" - "$NETCONF_LISTEN_ADDRESS" "$NETCONF_PORT" "$NETCONF_USER" "$NETCONF_KEY" <<'PY'
+import sys
+from ncclient import manager
+host, port, username, key_filename = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+session = None
+try:
+    session = manager.connect(
+        host=host, port=port, username=username, key_filename=key_filename,
+        hostkey_verify=False, allow_agent=False, look_for_keys=False, timeout=20,
+    )
+    reply = session.get_config(source="running")
+    if not bool(getattr(reply, "ok", False)):
+        raise RuntimeError("invalid get-config reply")
+finally:
+    if session is not None:
+        session.close_session()
+PY
+}
+
+netconf_limited_diagnostics() {
+  warn "Diagnóstico limitado da unidade NETCONF:"
+  systemctl show "$NETCONF_SYSTEMD_UNIT" \
+    --property=ActiveState,SubState,Result,MainPID,ExecMainStatus 2>&1 | tail -n 20 >&2 || true
+  ss -H -ltnp "sport = :$NETCONF_PORT" 2>&1 | tail -n 20 >&2 || true
+  sudo -n journalctl -u "$NETCONF_SYSTEMD_UNIT" -n 40 --no-pager 2>&1 | tail -n 40 >&2 || true
+}
+
+netconf_main_pid_absent() {
+  local pid="${1:-}"
+  [[ -z "$pid" || "$pid" == "0" ]] && return 0
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "1" ]] || return 1
+  [[ -d "$NETCONF_PROC_ROOT" && -r "$NETCONF_PROC_ROOT" && -x "$NETCONF_PROC_ROOT" ]] || return 1
+  [[ ! -e "$NETCONF_PROC_ROOT/$pid" ]]
+}
+
+netconf_residuals_only_captured() {
+  local captured_pid="${1:-}"
+  local residuals residual_pid count=0
+  [[ "$captured_pid" =~ ^[1-9][0-9]*$ && "$captured_pid" != "1" ]] || return 1
+  residuals="$(netconf_residual_pids)" || return 1
+  [[ -n "$residuals" ]] || return 1
+  while IFS= read -r residual_pid; do
+    [[ "$residual_pid" == "$captured_pid" ]] || return 1
+    count=$((count + 1))
+  done <<< "$residuals"
+  ((count == 1))
+}
+
+netconf_cleanup_diagnostic() {
+  local reason="$1"
+  local captured_pid="${2:-<none>}"
+  local residuals residual_status
+  if residuals="$(netconf_residual_pids)"; then
+    residual_status="${residuals:-<none>}"
+  else
+    residual_status="<unavailable>"
+  fi
+  warn "NETCONF_CLEANUP_DIAGNOSTIC_BEGIN"
+  warn "reason=$reason"
+  warn "captured_pid=$captured_pid"
+  warn "residual_pids=$residual_status"
+  warn "NETCONF_CLEANUP_DIAGNOSTIC_END"
+}
+
+netconf_wait_absent() {
+  local start_ns deadline_ns now_ns active pid residuals port_rc
+  start_ns="$(netconf_monotonic_ns)" || return 1
+  deadline_ns=$((start_ns + NETCONF_STOP_TIMEOUT_NS))
+  while :; do
+    now_ns="$(netconf_monotonic_ns)" || return 1
+    (( now_ns <= deadline_ns )) || return 1
+    active="$(systemctl show "$NETCONF_SYSTEMD_UNIT" --property=ActiveState --value 2>/dev/null)" \
+      || return 1
+    pid="$(netconf_main_pid)" || return 1
+    residuals="$(netconf_residual_pids)" || return 1
+    if port_listening "$NETCONF_PORT"; then
+      port_rc=0
+    else
+      port_rc=$?
+    fi
+    if [[ "$active" == "inactive" || "$active" == "failed" ]] \
+       && ((port_rc == 1)) && netconf_main_pid_absent "$pid" \
+       && [[ -z "$residuals" ]]; then
+      return 0
+    fi
+    netconf_poll_sleep
+  done
+}
+
+netconf_systemd_stop_once() {
+  local unit_pid="${1:-}"
+  local stop_rc=0 fingerprint="" captured_pid="" fingerprint_required=0 fingerprint_valid=1
+  if [[ -n "$unit_pid" && "$unit_pid" != "0" ]]; then
+    fingerprint_required=1
+    if fingerprint="$(netconf_capture_process_fingerprint "$unit_pid")"; then
+      captured_pid="${fingerprint%%$'\n'*}"
+    else
+      fingerprint_valid=0
+      captured_pid="$unit_pid"
+    fi
+  fi
+  sudo -n systemctl stop "$NETCONF_SYSTEMD_UNIT" || stop_rc=$?
+  sudo -n rm -f "$NETCONF_PIDFILE" 2>/dev/null || true
+  if netconf_wait_absent; then
+    if ((fingerprint_required && ! fingerprint_valid)); then
+      netconf_cleanup_diagnostic "pre-stop process fingerprint was ambiguous" "$captured_pid"
+      return 90
+    fi
+    if ((fingerprint_required)) && ! netconf_main_pid_absent "$captured_pid"; then
+      netconf_cleanup_diagnostic "captured PID still exists with changed or reused identity" "$captured_pid"
+      return 90
+    fi
+    return "$stop_rc"
+  fi
+  if ((! fingerprint_required || ! fingerprint_valid)); then
+    netconf_cleanup_diagnostic "no authenticated pre-stop process fingerprint" "$captured_pid"
+    return 90
+  fi
+  if ! netconf_residuals_only_captured "$captured_pid"; then
+    netconf_cleanup_diagnostic "residual set is ambiguous or includes an additional process" "$captured_pid"
+    return 90
+  fi
+  if ! netconf_process_fingerprint_valid "$fingerprint"; then
+    netconf_cleanup_diagnostic "captured process identity changed before TERM" "$captured_pid"
+    return 90
+  fi
+  warn "Fallback restrito: processo autenticado $captured_pid persistiu após timeout; enviando TERM."
+  sudo -n kill -TERM "$captured_pid" 2>/dev/null || true
+  sleep 0.5
+  if netconf_wait_absent; then
+    if netconf_main_pid_absent "$captured_pid"; then
+      return "$stop_rc"
+    fi
+    netconf_cleanup_diagnostic "captured PID changed or was reused after TERM" "$captured_pid"
+    return 90
+  fi
+  if ! netconf_residuals_only_captured "$captured_pid"; then
+    netconf_cleanup_diagnostic "residual set changed after TERM" "$captured_pid"
+    return 90
+  fi
+  if ! netconf_process_fingerprint_valid "$fingerprint"; then
+    netconf_cleanup_diagnostic "captured process identity changed before KILL" "$captured_pid"
+    return 90
+  fi
+  warn "Fallback restrito: processo autenticado $captured_pid persistiu após TERM; enviando KILL."
+  sudo -n kill -KILL "$captured_pid" 2>/dev/null || true
+  if netconf_wait_absent; then
+    if netconf_main_pid_absent "$captured_pid"; then
+      return "$stop_rc"
+    fi
+    netconf_cleanup_diagnostic "captured PID changed or was reused after KILL" "$captured_pid"
+    return 90
+  fi
+  netconf_cleanup_diagnostic "final absence gate failed after authenticated fallback" "$captured_pid"
+  return 90
+}
+
+stop_netconf() {
+  local unit_pid
+  if [[ "$DRY_RUN" == "1" ]]; then
+    info "Executaria parada idempotente de $NETCONF_SYSTEMD_UNIT."
+    return 0
+  fi
+  unit_pid="$(netconf_main_pid)"
+  netconf_systemd_stop_once "$unit_pid"
+}
+
+netconf_start_body() {
+  local module pair raw normalized pid
+  local qos_before_raw qos_before_normalized qos_after_raw qos_after_normalized
+  declare -A startup_raw=()
+  declare -A startup_normalized=()
+
+  netconf_preflight || return $?
+  for module in "${NETCONF_BOOTSTRAP_MODULES[@]}"; do
+    pair="$(netconf_snapshot "$module" startup)" \
+      || netconf_fail 30 "Falha ao capturar startup/$module" || return $?
+    read -r raw normalized <<<"$pair"
+    [[ -n "$raw" && -n "$normalized" ]] \
+      || netconf_fail 31 "Hashes vazios para startup/$module" || return $?
+    [[ "$raw" == "${NETCONF_CERTIFIED_STARTUP_SHA256[$module]}" ]] \
+      || netconf_fail 32 "Hash certificado divergente em startup/$module" || return $?
+    startup_raw[$module]="$raw"
+    startup_normalized[$module]="$normalized"
+  done
+  pair="$(netconf_snapshot l2i-qos running)" \
+    || netconf_fail 33 "Falha ao capturar running/l2i-qos" || return $?
+  read -r qos_before_raw qos_before_normalized <<<"$pair"
+  [[ -n "$qos_before_raw" && -n "$qos_before_normalized" ]] \
+    || netconf_fail 34 "Hashes vazios para running/l2i-qos" || return $?
+
+  NETCONF_START_ATTEMPTED=1
+  sudo -n systemctl start netopeer2-server.service \
+    || netconf_fail 40 "Falha no start único da unidade Netopeer2" || return $?
+  netconf_wait_unit_ready \
+    || netconf_fail 41 "Timeout aguardando unidade active/running com PID válido" || return $?
+  pid="$(netconf_main_pid)"
+
+  for module in "${NETCONF_BOOTSTRAP_MODULES[@]}"; do
+    sudo -n sysrepocfg -C startup -d running -m "$module" \
+      || netconf_fail 50 "Falha na cópia startup→running de $module" || return $?
+    pair="$(netconf_snapshot "$module" running)" \
+      || netconf_fail 51 "Falha ao validar running/$module" || return $?
+    read -r raw normalized <<<"$pair"
+    [[ "$normalized" == "${startup_normalized[$module]}" ]] \
+      || netconf_fail 52 "Divergência semântica/normalizada em running/$module" || return $?
+  done
+
+  for module in "${NETCONF_BOOTSTRAP_MODULES[@]}"; do
+    pair="$(netconf_snapshot "$module" startup)" \
+      || netconf_fail 53 "Falha no snapshot final de startup/$module" || return $?
+    read -r raw normalized <<<"$pair"
+    [[ "$raw" == "${startup_raw[$module]}" && "$normalized" == "${startup_normalized[$module]}" ]] \
+      || netconf_fail 54 "startup/$module foi alterado durante bootstrap" || return $?
+  done
+  pair="$(netconf_snapshot l2i-qos running)" \
+    || netconf_fail 55 "Falha no snapshot final de running/l2i-qos" || return $?
+  read -r qos_after_raw qos_after_normalized <<<"$pair"
+  [[ "$qos_after_raw" == "$qos_before_raw" && "$qos_after_normalized" == "$qos_before_normalized" ]] \
+    || netconf_fail 56 "running/l2i-qos foi alterado durante bootstrap" || return $?
+
+  netconf_stability_gate \
+    || netconf_fail 60 "Porta 830/PID não permaneceram estáveis por 2 segundos" || return $?
+  netconf_pid_valid "$(netconf_main_pid)" \
+    || netconf_fail 61 "PID Netopeer2 morreu antes da probe autenticada" || return $?
+  netconf_read_only_probe \
+    || netconf_fail 62 "Sessão NETCONF/get-config running falhou" || return $?
+  printf '%s\n' "$pid" | sudo -n tee "$NETCONF_PIDFILE" >/dev/null \
+    || netconf_fail 63 "Falha ao registrar PID real Netopeer2" || return $?
+  info "Netopeer2 qualificado em 127.0.0.1:$NETCONF_PORT (PID real=$pid)."
 }
 
 start_netconf() {
-  local netopeer_bin
-  local launcher_pid
-  local pid=""
-  local process_args=""
-  local i
-
-  if command -v netopeer2-server >/dev/null 2>&1; then
-    netopeer_bin="$(command -v netopeer2-server)"
-  elif [[ -x /usr/local/sbin/netopeer2-server ]]; then
-    netopeer_bin="/usr/local/sbin/netopeer2-server"
-  else
-    err "netopeer2-server não encontrado. Execute build_netconf antes."
-    exit 1
-  fi
-
-  if port_listening "$NETCONF_PORT"; then
-    info "NETCONF já está em execução na porta $NETCONF_PORT."
-    return 0
-  fi
-
-  stop_netconf
+  local rc unit_pid primary
+  NETCONF_PRIMARY_ERROR=""
+  NETCONF_START_ATTEMPTED=0
   if [[ "$DRY_RUN" == "1" ]]; then
+    info "Validaria o bootstrap NETCONF certificado via systemd."
     return 0
   fi
-
-  sudo rm -f "$NETCONF_PIDFILE"
-
-  # O sudo cria processos auxiliares de monitoramento. Portanto, o PID do
-  # launcher não é necessariamente o PID real do netopeer2-server. Iniciamos
-  # pelo método comprovadamente funcional e, após a abertura da porta 830,
-  # descobrimos o PID real pelo socket de escuta.
-  nohup sudo -n \
-    "$netopeer_bin" \
-    -d \
-    > "$NETCONF_LOG_FILE" 2>&1 \
-    </dev/null &
-
-  launcher_pid=$!
-
-  for ((i=1; i<=50; i++)); do
-    if port_listening "$NETCONF_PORT"; then
-      break
-    fi
-
-    if ! kill -0 "$launcher_pid" 2>/dev/null; then
-      break
-    fi
-
-    sleep 0.1
-  done
-
-  if ! port_listening "$NETCONF_PORT"; then
-    err "NETCONF não abriu a porta $NETCONF_PORT. Verifique $NETCONF_LOG_FILE"
-    tail -n 80 "$NETCONF_LOG_FILE" >&2 || true
-    stop_netconf
-    exit 1
+  if netconf_start_body; then
+    return 0
+  else
+    rc=$?
   fi
-
-  pid="$(
-    sudo ss -H -ltnp "sport = :$NETCONF_PORT" 2>/dev/null \
-      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
-      | head -n 1
-  )"
-
-  if [[ ! "$pid" =~ ^[0-9]+$ ]] \
-     || ! sudo kill -0 "$pid" 2>/dev/null; then
-    err "Não foi possível identificar o PID real do Netopeer2 na porta $NETCONF_PORT."
-    tail -n 80 "$NETCONF_LOG_FILE" >&2 || true
-    stop_netconf
-    exit 1
+  primary="${NETCONF_PRIMARY_ERROR:-bootstrap NETCONF falhou (rc=$rc)}"
+  if [[ "$NETCONF_START_ATTEMPTED" == "1" ]]; then
+    netconf_limited_diagnostics
+    unit_pid="$(netconf_main_pid)"
+    netconf_systemd_stop_once "$unit_pid" || true
   fi
-
-  process_args="$(
-    sudo ps -p "$pid" -o args= 2>/dev/null || true
-  )"
-
-  if [[ "$process_args" != *netopeer2-server* ]]; then
-    err "O PID $pid associado à porta $NETCONF_PORT não corresponde ao Netopeer2: $process_args"
-    stop_netconf
-    exit 1
-  fi
-
-  printf '%s\n' "$pid" \
-    | sudo tee "$NETCONF_PIDFILE" >/dev/null
-
-  info "Netopeer2 ativo na porta $NETCONF_PORT (PID real=$pid; launcher=$launcher_pid)."
+  NETCONF_PRIMARY_ERROR="$primary"
+  err "Falha primária preservada: $NETCONF_PRIMARY_ERROR"
+  return "$rc"
 }
 
 # -------------------------------
@@ -1095,26 +1749,36 @@ run_s1_mock() {
       --backend mock
 }
 
+s2_operational_execution_id() {
+  local mode="${S2_MODE:-adapt}"
+  local candidate
+  if [[ -v S2_EXECUTION_ID ]]; then
+    candidate="$S2_EXECUTION_ID"
+  else
+    candidate="s2-operational-$(date -u +%Y%m%dT%H%M%S%NZ)-${mode}"
+  fi
+  if [[ "$candidate" == "." || "$candidate" == ".." || ! "$candidate" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    err "S2_EXECUTION_ID inválido: deve ser um componente de path seguro"
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 run_s2_real() {
   require_repo_layout
+  local execution_id
+  execution_id="$(s2_operational_execution_id)" || return 1
   run_with_cleanup_trap \
     "$REPO_DIR/scripts/s2_topology_setup.sh" \
-    run_python_module_as_root scenarios.multicast_s2_recovery_stable5 \
+    run_python_module_as_root scenarios.multidomain_s2 \
       --spec "$REPO_DIR/specs/valid/s2_multicast_source_oriented.json" \
+      --execution-id "$execution_id" \
+      --repetition "${S2_REPETITION:-1}" \
+      --results-root "$REPO_DIR/results/S2" \
       --duration "${S2_DURATION:-10}" \
-      --be-mbps "${S2_BE_MBPS:-80}" \
-      --bwA "${S2_BWA:-40}" \
-      --bwB "${S2_BWB:-100}" \
-      --bwC "${S2_BWC:-100}" \
-      --delay-ms "${S2_DELAY_MS:-1}" \
       --mode "${S2_MODE:-adapt}" \
       --backend real \
-      --phase-splits "${S2_PHASE1:-3}" "${S2_PHASE2:-6}" \
-      --event-name "${S2_EVENT_NAME:-join}" \
-      --mcast-group-id "${S2_MCAST_GROUP_ID:-1}" \
-      --mcast-dst "${S2_MCAST_DST:-239.1.1.1}" \
-      --mcast-ports "${S2_MCAST_PORT0:-0}" "${S2_MCAST_PORT1:-1}" \
-      --rtt-interval-ms "${S2_RTT_INTERVAL_MS:-50}" \
+      --packet-interval-ms "${S2_PACKET_INTERVAL_MS:-50}" \
       --recovery-bin-ms "${S2_RECOVERY_BIN_MS:-500}" \
       --stable-k-bins "${S2_STABLE_K_BINS:-3}"
 }
@@ -1754,6 +2418,25 @@ all() {
   info "Bootstrap finalizado."
 }
 
+# Machine-readable taxonomy audited by tests/test_postcert_s2_operational.py.
+# S2_TAXONOMY run_s2_real canonical_scenario
+# S2_TAXONOMY run_s2_p4_dataplane_smoke specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_qos_contention specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_qos_contention_semantic_validation specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_state_recovery specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_state_recovery_foundation specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_state_recovery_validation specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_autonomous_assurance specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_autonomous_assurance_foundation specialized_validation_profile
+# S2_TAXONOMY run_s2_p4_autonomous_assurance_validation specialized_validation_profile
+# S2_TAXONOMY run_s2_multidomain_autonomous_assurance specialized_validation_profile
+# S2_TAXONOMY run_s2_multidomain_autonomous_assurance_foundation specialized_validation_profile
+# S2_TAXONOMY run_s2_multidomain_autonomous_assurance_timing_validation specialized_validation_profile
+# S2_TAXONOMY run_s2_multidomain_autonomous_assurance_final_timing_validation specialized_validation_profile
+# S2_TAXONOMY run_s2_multidomain_selective_assurance specialized_validation_profile
+# S2_TAXONOMY run_s2_multidomain_selective_assurance_foundation specialized_validation_profile
+# S2_TAXONOMY run_s2_multidomain_selective_assurance_validation specialized_validation_profile
+
 usage() {
   cat <<EOF
 Uso: ./setup_all.sh <acao>
@@ -1773,10 +2456,10 @@ Ações principais:
   collect_provenance
   run_s1_real
   run_s1_mock
-  run_s2_real
+  run_s2_real  [canonical_scenario: único cenário/engine S2 canônico]
   cleanup
 
-Ações internas úteis:
+Ações internas úteis — perfis especializados de validação S2, NONCANONICAL:
   build_sysrepo
   build_libnetconf2
   build_netopeer2
@@ -1825,6 +2508,10 @@ Variáveis úteis:
   DRY_RUN=1
 EOF
 }
+
+if [[ "${L2I_SETUP_LIB_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${1:-}" in
   all) all ;;

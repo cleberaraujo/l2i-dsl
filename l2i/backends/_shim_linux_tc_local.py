@@ -1310,7 +1310,7 @@ def tc_apply_h1(
     overlay: bool,
     dry_run: bool = False,
 ) -> JsonDict:
-    """Compatibilidade com ``scenarios.multicast_s2.tc_apply_h1``."""
+    """Compatibilidade histórica para chamadores S2 legados de TC local."""
 
     started = time.monotonic()
     target: JsonDict = {

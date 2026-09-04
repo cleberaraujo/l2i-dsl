@@ -419,24 +419,37 @@ run_s1_mock() {
     --backend mock
 }
 
+s2_operational_execution_id() {
+  local mode="${S2_MODE:-adapt}"
+  local candidate
+  if [[ -v S2_EXECUTION_ID ]]; then
+    candidate="$S2_EXECUTION_ID"
+  else
+    candidate="s2-operational-$(date -u +%Y%m%dT%H%M%S%NZ)-${mode}"
+  fi
+  if [[ "$candidate" == "." || "$candidate" == ".." || ! "$candidate" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    err "S2_EXECUTION_ID inválido: deve ser um componente de path seguro"
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 run_s2_real() {
   require_repo_layout
+  local execution_id
+  execution_id="$(s2_operational_execution_id)" || return 1
   run sudo "$REPO_DIR/scripts/s2_topology_setup.sh"
-  run sudo "$PYTHON_BIN" -m scenarios.multicast_s2_recovery_stable5 \
+  run sudo "$PYTHON_BIN" -m scenarios.multidomain_s2 \
     --spec "$REPO_DIR/specs/valid/s2_multicast_source_oriented.json" \
+    --execution-id "$execution_id" \
+    --repetition "${S2_REPETITION:-1}" \
+    --results-root "$REPO_DIR/results/S2" \
     --duration "${S2_DURATION:-10}" \
-    --be-mbps "${S2_BE_MBPS:-80}" \
-    --bwA "${S2_BWA:-40}" \
-    --bwB "${S2_BWB:-100}" \
-    --bwC "${S2_BWC:-100}" \
-    --delay-ms "${S2_DELAY_MS:-1}" \
     --mode "${S2_MODE:-adapt}" \
     --backend real \
-    --phase-splits "${S2_PHASE1:-3}" "${S2_PHASE2:-6}" \
-    --event-name join \
-    --rtt-interval-ms 50 \
-    --recovery-bin-ms 500 \
-    --stable-k-bins 3
+    --packet-interval-ms "${S2_PACKET_INTERVAL_MS:-50}" \
+    --recovery-bin-ms "${S2_RECOVERY_BIN_MS:-500}" \
+    --stable-k-bins "${S2_STABLE_K_BINS:-3}"
 }
 
 cleanup() {
@@ -483,6 +496,7 @@ all() {
   info "  $(basename "$0") run_s1_real"
 }
 
+# S2_TAXONOMY run_s2_real canonical_scenario
 usage() {
   cat <<USAGE
 Uso: $(basename "$0") <acao>
@@ -499,7 +513,7 @@ Ações principais:
   start_real_services   Sobe Netopeer2, P4 e carrega o pipeline.
   run_s1_mock           Executa S1 curto em modo mock.
   run_s1_real           Executa S1 curto em modo real.
-  run_s2_real           Executa S2 curto em modo real.
+  run_s2_real           [canonical_scenario] Executa o único cenário/engine S2 canônico.
   cleanup               Limpa topologias e encerra serviços.
 
 Variáveis úteis:

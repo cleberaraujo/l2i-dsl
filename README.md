@@ -177,6 +177,16 @@ Os experimentos completos incluem:
 * S1 — Unicast QoS
 * S2 — Multicast orientado à origem
 
+O único entrypoint operacional S2 publicado é
+`python -m scenarios.multidomain_s2`. As variantes `multicast_s2*` são
+históricas e não são comandos oficiais. Consulte
+[`docs/s2_operational_workflow.md`](docs/s2_operational_workflow.md).
+
+`./setup_all.sh run_s2_real` é a ação canônica de setup para esse engine. As
+demais ações `run_s2_p4_*` e `run_s2_multidomain_*` são perfis especializados
+de validação `NONCANONICAL`; preservam reproduções e claims históricos, mas não
+são entrypoints alternativos do cenário S2.
+
 Execução automatizada:
 
 ```bash

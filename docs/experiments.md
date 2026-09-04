@@ -117,20 +117,22 @@ sudo ~/l2i-dev/venv/bin/python -m scenarios.multidomain_s1 \
 ## 4.3 Cenário S2
 
 ```bash id="exp_s2_manual"
-sudo ~/l2i-dev/venv/bin/python -m scenarios.multicast_s2_recovery_stable5 \
+sudo ~/l2i-dev/venv/bin/python -m scenarios.multidomain_s2 \
   --spec specs/valid/s2_multicast_source_oriented.json \
+  --execution-id s2-manual-001 \
+  --repetition 1 \
+  --results-root results/S2 \
   --duration 30 \
-  --be-mbps 80 \
-  --bwA 40 --bwB 100 --bwC 100 \
-  --delay-ms 1 \
   --mode adapt \
   --backend real \
-  --phase-splits 10 15 \
-  --event-name join \
-  --rtt-interval-ms 50 \
+  --packet-interval-ms 50 \
   --recovery-bin-ms 500 \
   --stable-k-bins 3
 ```
+
+Esse é o único entrypoint operacional S2. Requisitos de intent, parâmetros de
+workload e parâmetros de ambiente têm papéis distintos; consulte
+[`s2_operational_workflow.md`](s2_operational_workflow.md).
 
 ---
 
@@ -284,7 +286,15 @@ Este conjunto de experimentos permite:
 
 ---
 
-# 🎯 10. Perfil calibrado do emissor S2/P4
+# Perfis especializados e reprodução histórica S2 — NONCANONICAL
+
+As Seções 10–13 e as ações `run_s2_p4_*`/`run_s2_multidomain_*` abaixo são
+perfis especializados de validação, não entrypoints alternativos do cenário
+S2. Seus resultados e claims históricos permanecem preservados em seu escopo.
+O quick start canônico é exclusivamente `./setup_all.sh run_s2_real`, que
+despacha `python -m scenarios.multidomain_s2`.
+
+# 🎯 10. Perfil especializado calibrado do emissor S2/P4 — NONCANONICAL
 
 O smoke test multicast no dataplane P4 utiliza, por padrão, o perfil calibrado
 `phase13-tailspin-900us-affinity-v1`. A seleção foi realizada no caminho
@@ -327,7 +337,7 @@ constitui, isoladamente, validação de QoS sob contenção nem de recuperação
 
 ---
 
-# 🎛️ 11. Perfil validado de contenção multicast S2/P4
+# 🎛️ 11. Perfil especializado de contenção multicast S2/P4 — NONCANONICAL
 
 O experimento de contenção multicast utiliza o perfil
 `phase14-s2-p4-qos-contention-v1`. O BMv2 realiza a replicação multicast e o
@@ -380,7 +390,7 @@ valida filas internas do P4 nem mecanismos de recuperação.
 
 ---
 
-# ♻️ 12. Perfil validado de recuperação de estado multicast S2/P4
+# ♻️ 12. Perfil especializado de recuperação de estado S2/P4 — NONCANONICAL
 
 O experimento de recuperação utiliza o perfil
 `phase15-s2-p4-state-recovery-v1`. O modelo de falha remove seletivamente, por
@@ -433,7 +443,7 @@ O perfil completo, os limiares e a delimitação das afirmações estão em
 
 ---
 
-# 🛡️ 13. Perfil validado de assurance autônomo S2/P4
+# 🛡️ 13. Perfil especializado de assurance autônomo S2/P4 — NONCANONICAL
 
 O ciclo persistente de assurance utiliza o perfil
 `phase16-s2-p4-autonomous-assurance-v1`. Diferentemente do ensaio da Seção 12,
@@ -500,10 +510,11 @@ falha sintética do adaptador experimental, não uma falha observada do backend.
 O perfil completo e a delimitação das afirmações estão em
 [`profiles/s2_autonomous_assurance_profile.json`](../profiles/s2_autonomous_assurance_profile.json).
 
-## Phase 4R/4RB synthetic S2 assurance qualification
+## Phase 4R/4RB specialized synthetic S2 assurance — NONCANONICAL
 
-`python3 -m scenarios.multidomain_s2` is a synthetic S2/RQ4 assurance harness,
-not the operational S2 runner. Its fixtures are technical qualification
+Os registros Phase 4R/4RB abaixo são históricos. Sua nomenclatura anterior ao
+pós-certificado está obsoleta e não redefine o entrypoint operacional S2.
+Suas fixtures permanecem de qualificação técnica
 artifacts, never scientific campaign members. It accepts only `backend=mock`
 and does not evidence topology, multicast, dataplane replication, real domain
 materialization, or operational parity. `execution_mode=adapt` is fixed for
